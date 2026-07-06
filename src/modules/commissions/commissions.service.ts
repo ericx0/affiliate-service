@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { supabase } from "../../config.js";
+import { supabase, stripe } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import {
   Commission,
@@ -147,4 +147,41 @@ export async function approveExpiredCooldowns(): Promise<number> {
 
   logger.info({ approved: count, total: expired?.length || 0 }, "cool-down approvals complete");
   return count;
+}
+
+/**
+ * Reverse a paid commission via Stripe Transfer reversal.
+ * Used when a refund occurs after payout.
+ */
+export async function reversePaidCommission(
+  commissionId: string,
+  reason: string
+): Promise<TransitionResult> {
+  const { data: commission, error } = await supabase
+    .from("commissions")
+    .select("*")
+    .eq("id", commissionId)
+    .single();
+
+  if (error || !commission) {
+    return { success: false, error: "Commission not found" };
+  }
+
+  if (commission.status !== "paid" || !commission.stripe_transfer_id) {
+    return { success: false, error: "Commission not paid or no Stripe transfer" };
+  }
+
+  try {
+    // Reverse the Stripe transfer
+    await stripe.transfers.createReversal(commission.stripe_transfer_id, {
+      amount: Math.round(commission.commission_amount * 100),  // cents
+      metadata: { commissionId, reason },
+    });
+
+    // Mark as reversed
+    return await transition(commissionId, "reversed", { refund_reason: reason });
+  } catch (err) {
+    logger.error({ err, commissionId }, "failed to reverse Stripe transfer");
+    return { success: false, error: (err as Error).message };
+  }
 }
