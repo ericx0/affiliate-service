@@ -5,15 +5,18 @@ import { logger } from "./utils/logger.js";
 import { hmacMiddleware } from "./middleware/hmac.js";
 import { errorHandler } from "./middleware/error.js";
 import { ordersRouter } from "./modules/orders/orders.routes.js";
+import { handleStripeWebhook } from "./modules/payouts/stripe-webhook.controller.js";
 
 const app = express();
 
 app.use(pinoHttp({ logger }));
 
 // Webhook route needs raw body — register BEFORE express.json()
-app.post("/webhooks/stripe", express.raw({ type: "application/json" }), (_req, _res) => {
-  // TODO: Task 3.4 — wire up Stripe webhook
-});
+app.post(
+  "/webhooks/stripe",
+  express.raw({ type: "application/json" }),
+  handleStripeWebhook
+);
 
 // Capture raw body for HMAC verification (before JSON parse)
 app.use((req, _res, next) => {
