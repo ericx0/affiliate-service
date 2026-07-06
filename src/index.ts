@@ -15,9 +15,26 @@ app.post("/webhooks/stripe", express.raw({ type: "application/json" }), (_req, _
   // TODO: Task 3.4 — wire up Stripe webhook
 });
 
-// All other routes use JSON + HMAC verification
+// Capture raw body for HMAC verification (before JSON parse)
+app.use((req, _res, next) => {
+  if (req.method === "POST" || req.method === "PUT" || req.method === "PATCH") {
+    let data = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => { data += chunk; });
+    req.on("end", () => {
+      (req as any).rawBody = data;
+      // Re-parse JSON for downstream handlers
+      if (req.headers["content-type"]?.includes("application/json")) {
+        try { req.body = JSON.parse(data); } catch { /* ignore */ }
+      }
+      next();
+    });
+  } else {
+    next();
+  }
+});
 app.use(express.json({ limit: "1mb" }));
-app.use(hmacMiddleware); // verifies X-LCM-Signature
+app.use(hmacMiddleware(env.LCM_AFFILIATE_SECRET));
 
 app.get("/health", (_req, res) => res.json({ status: "ok", service: "affiliate-service" }));
 
