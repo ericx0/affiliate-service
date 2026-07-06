@@ -1,5 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
-import crypto from "node:crypto";
+import { describe, it, expect } from "vitest";
 import { generateVisitorSessionId, extractReferralCode } from "./clicks.middleware.js";
 
 describe("generateVisitorSessionId", () => {
