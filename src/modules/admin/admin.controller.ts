@@ -298,7 +298,7 @@ export async function updatePromoter(req: Request, res: Response) {
 const SuspendSchema = z.object({ reason: z.string().min(1) });
 
 async function changePromoterStatus(
-  _req: Request,
+  req: Request,
   res: Response,
   newStatus: "active" | "suspended",
   action: "suspend" | "activate"
@@ -728,7 +728,7 @@ export async function listAuditLogs(req: Request, res: Response) {
 // DASHBOARD endpoint (uses pg for KPI aggregation)
 // ============================================================
 
-export async function getDashboardStats(req: Request, res: Response) {
+export async function getDashboardStats(_req: Request, res: Response) {
   try {
     const thisMonth = await pgQueryOne<any>(`
       SELECT

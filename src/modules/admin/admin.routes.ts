@@ -15,12 +15,16 @@ import {
   listRefunds,
   listPayouts,
   listAuditLogs,
+  getDashboardStats,
 } from "./admin.controller.js";
 
 export const adminRouter = Router();
 
 const READ_ROLES = ["kol_manager", "finance", "super_admin", "compliance", "viewer"];
 const WRITE_ROLES = ["kol_manager", "finance", "super_admin"];
+
+// Dashboard
+adminRouter.get("/dashboard", requireRole(READ_ROLES), getDashboardStats);
 
 // Payouts (Phase 3)
 adminRouter.post("/payout/manual", requireRole(WRITE_ROLES), manualPayout);
