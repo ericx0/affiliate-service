@@ -14,6 +14,10 @@ const EnvSchema = z.object({
 
   LCM_AFFILIATE_SECRET: z.string().min(32, "HMAC secret must be at least 32 chars"),
 
+  // Direct Postgres connection (bypasses PostgREST for schema cache issues).
+  // Format: postgresql://postgres:[PASSWORD]@db.bqjbvnkdhbrkdaraxnvm.supabase.co:5432/postgres
+  DATABASE_URL: z.string().optional(),
+
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
 });
 
