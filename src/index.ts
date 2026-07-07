@@ -37,11 +37,14 @@ app.use(express.json({
 // Health check — unauthenticated, no HMAC
 app.get("/health", (_req, res) => res.json({ status: "ok", service: "affiliate-service" }));
 
-// HMAC verification for /api/affiliate/orders, /admin, /promoters (internal service-to-service)
-// /api/affiliate/auth/admin/* uses Supabase JWT (admin user auth) — no HMAC
-app.use("/api/affiliate/orders", ordersRouter);
-app.use("/api/affiliate/admin", hmacMiddleware(env.LCM_AFFILIATE_SECRET), adminRouter);
-app.use("/api/affiliate/promoters", hmacMiddleware(env.LCM_AFFILIATE_SECRET), promotersRouter);
+// Routes:
+//   /api/affiliate/orders/*    — HMAC (service-to-service from main-site)
+//   /api/affiliate/admin/*     — JWT + 2FA (admin user login via chinamed-admin)
+//   /api/affiliate/promoters/*  — JWT + 2FA (admin creates KOL)
+//   /api/affiliate/auth/admin/* — JWT only (setup 2FA itself)
+app.use("/api/affiliate/orders", hmacMiddleware(env.LCM_AFFILIATE_SECRET), ordersRouter);
+app.use("/api/affiliate/admin", adminRouter);   // adminAuthMiddleware inside adminRouter
+app.use("/api/affiliate/promoters", promotersRouter);  // adminAuthMiddleware inside promotersRouter
 app.use("/api/affiliate/auth/admin", adminAuthRouter);
 
 app.use(errorHandler);

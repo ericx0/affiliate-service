@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { requireRole } from "../../middleware/admin-auth.js";
+import { adminAuthMiddleware } from "../../middleware/admin-auth.js";
 import {
   manualPayout,
   triggerBatchPayout,
@@ -20,36 +20,40 @@ import {
 
 export const adminRouter = Router();
 
+// All admin routes require Supabase JWT + (optional) 2FA TOTP code.
+// (Phase A: real Supabase auth via adminAuthMiddleware)
+adminRouter.use(adminAuthMiddleware);
+
 const READ_ROLES = ["kol_manager", "finance", "super_admin", "compliance", "viewer"];
 const WRITE_ROLES = ["kol_manager", "finance", "super_admin"];
 
 // Dashboard
-adminRouter.get("/dashboard", requireRole(READ_ROLES), getDashboardStats);
+adminRouter.get("/dashboard", getDashboardStats);
 
 // Payouts (Phase 3)
-adminRouter.post("/payout/manual", requireRole(WRITE_ROLES), manualPayout);
-adminRouter.post("/payout/batch", requireRole(WRITE_ROLES), triggerBatchPayout);
+adminRouter.post("/payout/manual", manualPayout);
+adminRouter.post("/payout/batch", triggerBatchPayout);
 
 // Promoters
-adminRouter.get("/promoters", requireRole(READ_ROLES), listPromoters);
-adminRouter.get("/promoters/:id", requireRole(READ_ROLES), getPromoter);
-adminRouter.patch("/promoters/:id", requireRole(WRITE_ROLES), updatePromoter);
-adminRouter.post("/promoters/:id/suspend", requireRole(WRITE_ROLES), suspendPromoter);
-adminRouter.post("/promoters/:id/activate", requireRole(WRITE_ROLES), activatePromoter);
+adminRouter.get("/promoters", listPromoters);
+adminRouter.get("/promoters/:id", getPromoter);
+adminRouter.patch("/promoters/:id", updatePromoter);
+adminRouter.post("/promoters/:id/suspend", suspendPromoter);
+adminRouter.post("/promoters/:id/activate", activatePromoter);
 
 // Codes
-adminRouter.get("/codes", requireRole(READ_ROLES), listCodes);
+adminRouter.get("/codes", listCodes);
 
 // Commissions
-adminRouter.get("/commissions", requireRole(READ_ROLES), listCommissions);
-adminRouter.post("/commissions/:id/approve", requireRole(WRITE_ROLES), approveCommission);
-adminRouter.post("/commissions/:id/reverse", requireRole(WRITE_ROLES), reverseCommission);
+adminRouter.get("/commissions", listCommissions);
+adminRouter.post("/commissions/:id/approve", approveCommission);
+adminRouter.post("/commissions/:id/reverse", reverseCommission);
 
 // Refunds (read-only)
-adminRouter.get("/refunds", requireRole(READ_ROLES), listRefunds);
+adminRouter.get("/refunds", listRefunds);
 
-// Payouts (read-only — distinguish from POST /payout/*)
-adminRouter.get("/payouts", requireRole(READ_ROLES), listPayouts);
+// Payouts (read-only)
+adminRouter.get("/payouts", listPayouts);
 
 // Audit logs (read-only)
-adminRouter.get("/audit-logs", requireRole(READ_ROLES), listAuditLogs);
+adminRouter.get("/audit-logs", listAuditLogs);
