@@ -22,28 +22,16 @@ app.post(
   handleStripeWebhook
 );
 
-// Capture raw body for HMAC verification (before JSON parse)
-// Note: do NOT call req.setEncoding("utf8") — raw-body lib requires
-// encoding to NOT be set, otherwise it throws "stream encoding should not be set"
-app.use((req, _res, next) => {
-  if (req.method === "POST" || req.method === "PUT" || req.method === "PATCH") {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => { chunks.push(chunk); });
-    req.on("end", () => {
-      const buf = Buffer.concat(chunks);
-      const data = buf.toString("utf8");
-      (req as any).rawBody = data;
-      // Re-parse JSON for downstream handlers
-      if (req.headers["content-type"]?.includes("application/json") && data) {
-        try { req.body = JSON.parse(data); } catch { /* ignore */ }
-      }
-      next();
-    });
-  } else {
-    next();
-  }
-});
-app.use(express.json({ limit: "1mb" }));
+// Parse JSON body + capture raw body via body-parser's verify hook.
+// This is the supported way to get rawBody alongside parsed body,
+// avoiding the "stream is not readable" / "stream encoding should not be set"
+// errors that come with manually reading the stream before body-parser.
+app.use(express.json({
+  limit: "1mb",
+  verify: (req, _res, buf) => {
+    (req as any).rawBody = buf.toString("utf8");
+  },
+}));
 
 // Health check — unauthenticated, no HMAC
 app.get("/health", (_req, res) => res.json({ status: "ok", service: "affiliate-service" }));
