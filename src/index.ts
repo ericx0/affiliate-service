@@ -37,12 +37,11 @@ app.use(express.json({
 // Health check — unauthenticated, no HMAC
 app.get("/health", (_req, res) => res.json({ status: "ok", service: "affiliate-service" }));
 
-// HMAC verification only for /api/affiliate/* routes
-app.use("/api/affiliate", hmacMiddleware(env.LCM_AFFILIATE_SECRET));
-
+// HMAC verification for /api/affiliate/orders, /admin, /promoters (internal service-to-service)
+// /api/affiliate/auth/admin/* uses Supabase JWT (admin user auth) — no HMAC
 app.use("/api/affiliate/orders", ordersRouter);
-app.use("/api/affiliate/admin", adminRouter);
-app.use("/api/affiliate/promoters", promotersRouter);
+app.use("/api/affiliate/admin", hmacMiddleware(env.LCM_AFFILIATE_SECRET), adminRouter);
+app.use("/api/affiliate/promoters", hmacMiddleware(env.LCM_AFFILIATE_SECRET), promotersRouter);
 app.use("/api/affiliate/auth/admin", adminAuthRouter);
 
 app.use(errorHandler);
