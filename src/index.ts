@@ -40,9 +40,12 @@ app.use((req, _res, next) => {
   }
 });
 app.use(express.json({ limit: "1mb" }));
-app.use(hmacMiddleware(env.LCM_AFFILIATE_SECRET));
 
+// Health check — unauthenticated, no HMAC
 app.get("/health", (_req, res) => res.json({ status: "ok", service: "affiliate-service" }));
+
+// HMAC verification only for /api/affiliate/* routes
+app.use("/api/affiliate", hmacMiddleware(env.LCM_AFFILIATE_SECRET));
 
 app.use("/api/affiliate/orders", ordersRouter);
 app.use("/api/affiliate/admin", adminRouter);
