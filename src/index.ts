@@ -49,13 +49,19 @@ app.use("/api/affiliate/admin", adminRouter);
 
 app.use(errorHandler);
 
-app.listen(env.PORT, () => {
-  logger.info({ port: env.PORT }, "affiliate-service listening");
+// Only start the server (listen + cron) when running as a standalone Node process.
+// On Vercel serverless, we just export the app — Vercel invokes it as a function
+// and cron jobs are dispatched via Vercel Cron separately.
+if (!process.env.VERCEL) {
+  app.listen(env.PORT, () => {
+    logger.info({ port: env.PORT }, "affiliate-service listening");
 
-  if (env.NODE_ENV !== "test") {
-    startCooldownApprovalJob();
-    startMonthlyPayoutJob();
-  }
-});
+    if (env.NODE_ENV !== "test") {
+      startCooldownApprovalJob();
+      startMonthlyPayoutJob();
+    }
+  });
+}
 
+export default app;
 export { app };
