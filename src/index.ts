@@ -23,15 +23,18 @@ app.post(
 );
 
 // Capture raw body for HMAC verification (before JSON parse)
+// Note: do NOT call req.setEncoding("utf8") — raw-body lib requires
+// encoding to NOT be set, otherwise it throws "stream encoding should not be set"
 app.use((req, _res, next) => {
   if (req.method === "POST" || req.method === "PUT" || req.method === "PATCH") {
-    let data = "";
-    req.setEncoding("utf8");
-    req.on("data", (chunk) => { data += chunk; });
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => { chunks.push(chunk); });
     req.on("end", () => {
+      const buf = Buffer.concat(chunks);
+      const data = buf.toString("utf8");
       (req as any).rawBody = data;
       // Re-parse JSON for downstream handlers
-      if (req.headers["content-type"]?.includes("application/json")) {
+      if (req.headers["content-type"]?.includes("application/json") && data) {
         try { req.body = JSON.parse(data); } catch { /* ignore */ }
       }
       next();
