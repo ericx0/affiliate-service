@@ -25,6 +25,18 @@ export function hmacMiddleware(secret: string = process.env.LCM_AFFILIATE_SECRET
     const rawBody = (req as any).rawBody || JSON.stringify(req.body);
     const expectedSig = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
 
+    // Debug: log hash inputs (TEMPORARY for debugging)
+    logger.warn({
+      path: req.path,
+      method: req.method,
+      rawBodyLen: rawBody.length,
+      rawBodyPreview: rawBody.substring(0, 80),
+      secretLen: secret.length,
+      secretTail: secret.substring(secret.length - 4),
+      providedSigLen: providedSig.length,
+      expectedSigTail: expectedSig.substring(0, 8),
+    }, "HMAC debug");
+
     const providedBuf = Buffer.from(providedSig, "hex");
     const expectedBuf = Buffer.from(expectedSig, "hex");
     if (providedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(providedBuf, expectedBuf)) {
