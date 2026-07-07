@@ -1,9 +1,7 @@
 import { RequestHandler, Request, Response, NextFunction } from "express";
 import { createClient } from "@supabase/supabase-js";
-import * as otplib from "otplib";
+import { authenticator } from "otplib";
 import { env } from "../config.js";
-
-const { authenticator } = otplib;
 
 /**
  * Admin JWT + 2FA authentication middleware.
@@ -38,7 +36,7 @@ declare global {
 }
 
 /**
- * Verify TOTP code against secret. otplib.check() is valid within ±1 step (30s window).
+ * Verify TOTP code against secret (otplib 12.x compatible).
  */
 export function verifyTotp(secret: string, code: string): boolean {
   try {
@@ -132,7 +130,6 @@ export const adminAuthMiddleware: RequestHandler = async (req, res, next) => {
  */
 export function requireRole(_roles: string[]) {
   return (_req: Request, _res: Response, next: NextFunction) => {
-    // Placeholder: if reached here, adminAuthMiddleware has already verified is_admin.
     next();
   };
 }
