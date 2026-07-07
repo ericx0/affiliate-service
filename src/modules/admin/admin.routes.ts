@@ -24,9 +24,6 @@ export const adminRouter = Router();
 // (Phase A: real Supabase auth via adminAuthMiddleware)
 adminRouter.use(adminAuthMiddleware);
 
-const READ_ROLES = ["kol_manager", "finance", "super_admin", "compliance", "viewer"];
-const WRITE_ROLES = ["kol_manager", "finance", "super_admin"];
-
 // Dashboard
 adminRouter.get("/dashboard", getDashboardStats);
 
