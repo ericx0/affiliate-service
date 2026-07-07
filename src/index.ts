@@ -7,6 +7,7 @@ import { errorHandler } from "./middleware/error.js";
 import { ordersRouter } from "./modules/orders/orders.routes.js";
 import { adminRouter } from "./modules/admin/admin.routes.js";
 import { promotersRouter } from "./modules/promoters/promoters.routes.js";
+import { adminAuthRouter } from "./modules/auth/auth.routes.js";
 import { handleStripeWebhook } from "./modules/payouts/stripe-webhook.controller.js";
 import { startCooldownApprovalJob } from "./jobs/approve-expired-cooldown.js";
 import { startMonthlyPayoutJob } from "./jobs/monthly-payout-batch.js";
@@ -42,6 +43,7 @@ app.use("/api/affiliate", hmacMiddleware(env.LCM_AFFILIATE_SECRET));
 app.use("/api/affiliate/orders", ordersRouter);
 app.use("/api/affiliate/admin", adminRouter);
 app.use("/api/affiliate/promoters", promotersRouter);
+app.use("/api/affiliate/auth/admin", adminAuthRouter);
 
 app.use(errorHandler);
 
