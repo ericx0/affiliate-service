@@ -1,4 +1,5 @@
 import express from "express";
+import cors from "cors";
 import pinoHttp from "pino-http";
 import { env } from "./config.js";
 import { logger } from "./utils/logger.js";
@@ -8,11 +9,22 @@ import { ordersRouter } from "./modules/orders/orders.routes.js";
 import { adminRouter } from "./modules/admin/admin.routes.js";
 import { promotersRouter } from "./modules/promoters/promoters.routes.js";
 import { adminAuthRouter } from "./modules/auth/auth.routes.js";
+import { meRouter } from "./modules/me/me.routes.js";
+import { registerRouter } from "./modules/auth/register.routes.js";
 import { handleStripeWebhook } from "./modules/payouts/stripe-webhook.controller.js";
 import { startCooldownApprovalJob } from "./jobs/approve-expired-cooldown.js";
 import { startMonthlyPayoutJob } from "./jobs/monthly-payout-batch.js";
 
 const app = express();
+
+// CORS — allow the KOL portal to call this service cross-origin.
+// Without this, every browser fetch fails at the preflight stage.
+app.use(cors({
+  origin: ["https://affiliate.linkchinamed.com"],
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-TOTP-Code"],
+  credentials: false,
+}));
 
 app.use(pinoHttp({ logger }));
 
@@ -38,14 +50,18 @@ app.use(express.json({
 app.get("/health", (_req, res) => res.json({ status: "ok", service: "affiliate-service" }));
 
 // Routes:
-//   /api/affiliate/orders/*    — HMAC (service-to-service from main-site)
-//   /api/affiliate/admin/*     — JWT + 2FA (admin user login via chinamed-admin)
-//   /api/affiliate/promoters/*  — JWT + 2FA (admin creates KOL)
-//   /api/affiliate/auth/admin/* — JWT only (setup 2FA itself)
+//   /api/affiliate/orders/*       — HMAC (service-to-service from main-site)
+//   /api/affiliate/admin/*        — JWT + 2FA (admin user login via chinamed-admin)
+//   /api/affiliate/promoters/*    — JWT + 2FA (admin creates KOL)
+//   /api/affiliate/auth/admin/*   — JWT only (setup 2FA itself)
+//   /api/affiliate/me/*           — KOL self-service (dashboard data)
+//   /api/affiliate/auth/register  — KOL self-registration (signed in, email-verified)
 app.use("/api/affiliate/orders", hmacMiddleware(env.LCM_AFFILIATE_SECRET), ordersRouter);
 app.use("/api/affiliate/admin", adminRouter);   // adminAuthMiddleware inside adminRouter
 app.use("/api/affiliate/promoters", promotersRouter);  // adminAuthMiddleware inside promotersRouter
 app.use("/api/affiliate/auth/admin", adminAuthRouter);
+app.use("/api/affiliate/me", meRouter);
+app.use("/api/affiliate/auth/register", registerRouter);
 
 app.use(errorHandler);
 
