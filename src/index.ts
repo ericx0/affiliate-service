@@ -14,6 +14,7 @@ import { registerRouter } from "./modules/auth/register.routes.js";
 import { handleStripeWebhook } from "./modules/payouts/stripe-webhook.controller.js";
 import { startCooldownApprovalJob } from "./jobs/approve-expired-cooldown.js";
 import { startMonthlyPayoutJob } from "./jobs/monthly-payout-batch.js";
+import { cronRouter } from "./modules/cron/cron.routes.js";
 
 const app = express();
 
@@ -62,6 +63,7 @@ app.use("/api/affiliate/promoters", promotersRouter);  // adminAuthMiddleware in
 app.use("/api/affiliate/auth/admin", adminAuthRouter);
 app.use("/api/affiliate/me", meRouter);
 app.use("/api/affiliate/auth/register", registerRouter);
+app.use("/api/affiliate/cron", cronRouter);
 
 app.use(errorHandler);
 

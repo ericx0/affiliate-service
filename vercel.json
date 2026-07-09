@@ -17,5 +17,15 @@
   ],
   "env": {
     "NODE_ENV": "production"
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/affiliate/cron/approve-cooldown",
+      "schedule": "0 0 * * *"
+    },
+    {
+      "path": "/api/affiliate/cron/monthly-payout",
+      "schedule": "0 23 14 * *"
+    }
+  ]
 }

@@ -1,4 +1,19 @@
 // One-off script: create admin user via Supabase service_role
+//
+// S1 fix: admin email + password now come from .env (ADMIN_EMAIL,
+// ADMIN_PASSWORD) so this script no longer ships plaintext credentials.
+// First-time setup:
+//
+//   1. Add to .env (or .env.local) at the project root:
+//        ADMIN_EMAIL=admin2026@linkchinamed.com
+//        ADMIN_PASSWORD=<a strong random password you generate>
+//   2. node create-admin.mjs
+//
+// For environments that already have the admin user provisioned
+// (e.g. production), this script only resets the password to the
+// value in ADMIN_PASSWORD — it does not rotate the email.
+//
+// SECURITY: never commit a populated ADMIN_PASSWORD to git.
 import { createClient } from "@supabase/supabase-js";
 import "dotenv/config";
 
@@ -9,10 +24,15 @@ if (!url || !key) {
   process.exit(1);
 }
 
-const sb = createClient(url, key, { auth: { persistSession: false } });
-
-const EMAIL = "admin2026@linkchinamed.com";
-const PASSWORD = "Eric@2026";
+const EMAIL = process.env.ADMIN_EMAIL;
+const PASSWORD = process.env.ADMIN_PASSWORD;
+if (!EMAIL || !PASSWORD) {
+  console.error(
+    "Set ADMIN_EMAIL and ADMIN_PASSWORD in .env (or .env.local) before running.\n" +
+      "Generate a strong random password with: openssl rand -base64 32"
+  );
+  process.exit(1);
+}
 
 // 1. Check if user already exists
 const { data: existing } = await sb.auth.admin.listUsers();
