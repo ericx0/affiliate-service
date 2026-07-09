@@ -5,6 +5,10 @@ const EnvSchema = z.object({
   PORT: z.coerce.number().default(3001),
   APP_URL: z.string().url(),
   WEB_URL: z.string().url(),
+  // KOL portal URL (e.g. https://affiliate.linkchinamed.com). Used
+  // as the base for Stripe Connect return/refresh URLs. Falls back
+  // to WEB_URL when not set (dev convenience).
+  PORTAL_URL: z.string().url().optional(),
 
   SUPABASE_URL: z.string().url(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
@@ -29,6 +33,6 @@ export const supabase: SupabaseClient = createClient(env.SUPABASE_URL, env.SUPAB
 
 import Stripe from "stripe";
 export const stripe = new Stripe(env.STRIPE_SECRET_KEY, {
-  apiVersion: "2024-06-20",
+  apiVersion: "2023-10-16",
   httpClient: Stripe.createFetchHttpClient(),
 });

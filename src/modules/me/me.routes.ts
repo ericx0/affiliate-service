@@ -6,8 +6,11 @@ import {
   getMyCodes,
   getMyPayouts,
   getMe,
-  getMyStripeStatus,
 } from "./me.controller.js";
+import {
+  postMyStripeConnect,
+  getMyStripeStatus,
+} from "./stripe-connect.controller.js";
 
 export const meRouter = Router();
 
@@ -21,3 +24,4 @@ meRouter.get("/codes", getMyCodes);
 meRouter.get("/payouts", getMyPayouts);
 meRouter.get("/me", getMe);
 meRouter.get("/stripe-status", getMyStripeStatus);
+meRouter.post("/stripe-connect", postMyStripeConnect);

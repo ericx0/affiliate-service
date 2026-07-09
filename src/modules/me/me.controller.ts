@@ -100,16 +100,3 @@ export async function getMe(req: Request, res: Response) {
   }
   res.json({ data: data ?? null });
 }
-
-/**
- * GET /me/stripe-status — stub for now (Stripe Connect onboarding not live yet).
- */
-export async function getMyStripeStatus(_req: Request, res: Response) {
-  res.json({
-    data: {
-      connected: false,
-      accountId: null,
-      payoutsEnabled: false,
-    },
-  });
-}
