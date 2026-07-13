@@ -3,6 +3,7 @@ import { z } from "zod";
 import { logger } from "../../utils/logger.js";
 import { supabase } from "../../config.js";
 import { attachToOrder, transition } from "../commissions/commissions.service.js";
+import { internalError } from "../../utils/controller-error.js";
 
 const AttachSchema = z.object({
   orderId: z.string().uuid(),
@@ -36,7 +37,7 @@ export async function attach(req: Request, res: Response) {
   });
 
   if (!result.success) {
-    return res.status(500).json({ error: { code: "ATTACH_FAILED", message: result.error } });
+    return internalError(res, "ATTACH_FAILED", result)
   }
 
   res.json({ success: true, commission: result.commission });

@@ -4,6 +4,7 @@ import { supabase } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { generateTotpSecret, getTotpAuthUrl, verifyTotp } from "../../middleware/admin-auth.js";
 import { writeAuditLog } from "../admin/audit.service.js";
+import { internalError } from "../../utils/controller-error.js";
 
 /**
  * Admin 2FA setup endpoints.
@@ -30,7 +31,7 @@ export async function setupTotp(req: Request, res: Response) {
 
   if (error) {
     logger.error({ err: error }, "setupTotp failed");
-    res.status(500).json({ error: { code: "SETUP_FAILED", message: error.message } });
+    internalError(res, "SETUP_FAILED", error);
     return;
   }
 
@@ -87,7 +88,7 @@ export async function verifyTotpSetup(req: Request, res: Response) {
     .eq("id", user.id);
 
   if (error) {
-    res.status(500).json({ error: { code: "ENABLE_FAILED", message: error.message } });
+    internalError(res, "ENABLE_FAILED", error);
     return;
   }
 
@@ -146,7 +147,7 @@ export async function disableTotp(req: Request, res: Response) {
     .eq("id", user.id);
 
   if (error) {
-    res.status(500).json({ error: { code: "DISABLE_FAILED", message: error.message } });
+    internalError(res, "DISABLE_FAILED", error);
     return;
   }
 

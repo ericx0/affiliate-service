@@ -4,6 +4,7 @@ import { supabase } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { paySingleCommission, payCommissions } from "../payouts/payouts.service.js";
 import { writeAuditLog } from "./audit.service.js";
+import { internalError } from "../../utils/controller-error.js";
 
 // Read the real admin identity that adminAuthMiddleware attaches. Previously
 // this read req.adminId / req.adminEmail (never set) and silently logged
@@ -41,7 +42,7 @@ export async function manualPayout(req: Request, res: Response) {
 
   const result = await paySingleCommission(commissionId);
   if (!result.success) {
-    return res.status(500).json({ error: { code: "PAYOUT_FAILED", message: result.error } });
+    return internalError(res, "PAYOUT_FAILED", result);
   }
 
   await writeAuditLog({
@@ -118,14 +119,14 @@ export async function listPromoters(req: Request, res: Response) {
     p_limit: filters.limit,
     p_offset: filters.offset,
   });
-  if (error) return res.status(500).json({ error: { code: "QUERY_FAILED", message: error.message } });
+  if (error) return internalError(res, "QUERY_FAILED", error);
   res.json(data);
 }
 
 export async function getPromoter(req: Request, res: Response) {
   const { id } = req.params;
   const { data, error } = await supabase.rpc("affiliate_get_promoter", { p_id: id });
-  if (error) return res.status(500).json({ error: { code: "QUERY_FAILED", message: error.message } });
+  if (error) return internalError(res, "QUERY_FAILED", error);
   if (!data) return res.status(404).json({ error: { code: "NOT_FOUND", message: "Promoter not found" } });
   res.json(data);
 }
@@ -154,7 +155,7 @@ export async function updatePromoter(req: Request, res: Response) {
     p_actor_id: ctx.adminId,
   });
 
-  if (error) return res.status(500).json({ error: { code: "UPDATE_FAILED", message: error.message } });
+  if (error) return internalError(res, "UPDATE_FAILED", error);
 
   await writeAuditLog({
     actorId: ctx.adminId,
@@ -184,7 +185,7 @@ export async function suspendPromoter(req: Request, res: Response) {
     p_id: id,
     p_reason: reason,
   });
-  if (error) return res.status(500).json({ error: { code: "UPDATE_FAILED", message: error.message } });
+  if (error) return internalError(res, "UPDATE_FAILED", error);
 
   await writeAuditLog({
     actorId: ctx.adminId,
@@ -208,7 +209,7 @@ export async function activatePromoter(req: Request, res: Response) {
   if (!before) return res.status(404).json({ error: { code: "NOT_FOUND", message: "Promoter not found" } });
 
   const { data, error } = await supabase.rpc("affiliate_activate_promoter", { p_id: id });
-  if (error) return res.status(500).json({ error: { code: "UPDATE_FAILED", message: error.message } });
+  if (error) return internalError(res, "UPDATE_FAILED", error);
 
   await writeAuditLog({
     actorId: ctx.adminId,
@@ -239,7 +240,7 @@ export async function listCodes(req: Request, res: Response) {
     p_limit: filters.limit,
     p_offset: filters.offset,
   });
-  if (error) return res.status(500).json({ error: { code: "QUERY_FAILED", message: error.message } });
+  if (error) return internalError(res, "QUERY_FAILED", error);
   res.json(data);
 }
 
@@ -264,7 +265,7 @@ export async function listCommissions(req: Request, res: Response) {
     p_limit: filters.limit,
     p_offset: filters.offset,
   });
-  if (error) return res.status(500).json({ error: { code: "QUERY_FAILED", message: error.message } });
+  if (error) return internalError(res, "QUERY_FAILED", error);
   res.json(data);
 }
 
@@ -279,7 +280,7 @@ export async function approveCommission(req: Request, res: Response) {
     p_id: id,
     p_reason: reason,
   });
-  if (error) return res.status(500).json({ error: { code: "UPDATE_FAILED", message: error.message } });
+  if (error) return internalError(res, "UPDATE_FAILED", error);
   if (data?.error) {
     if (data.error === "not_found") return res.status(404).json({ error: { code: "NOT_FOUND" } });
     if (data.error === "invalid_state") {
@@ -338,7 +339,7 @@ export async function reverseCommission(req: Request, res: Response) {
     p_id: id,
     p_reason: reason,
   });
-  if (error) return res.status(500).json({ error: { code: "UPDATE_FAILED", message: error.message } });
+  if (error) return internalError(res, "UPDATE_FAILED", error);
 
   await writeAuditLog({
     actorId: ctx.adminId,
@@ -358,7 +359,7 @@ export async function listRefunds(req: Request, res: Response) {
   const limit = Number(req.query.limit) || 50;
   const offset = Number(req.query.offset) || 0;
   const { data, error } = await supabase.rpc("affiliate_list_refunds", { p_limit: limit, p_offset: offset });
-  if (error) return res.status(500).json({ error: { code: "QUERY_FAILED", message: error.message } });
+  if (error) return internalError(res, "QUERY_FAILED", error);
   res.json(data);
 }
 
@@ -371,7 +372,7 @@ export async function listPayouts(req: Request, res: Response) {
     p_limit: limit,
     p_offset: offset,
   });
-  if (error) return res.status(500).json({ error: { code: "QUERY_FAILED", message: error.message } });
+  if (error) return internalError(res, "QUERY_FAILED", error);
   res.json(data);
 }
 
@@ -398,12 +399,12 @@ export async function listAuditLogs(req: Request, res: Response) {
     p_limit: filters.limit,
     p_offset: filters.offset,
   });
-  if (error) return res.status(500).json({ error: { code: "QUERY_FAILED", message: error.message } });
+  if (error) return internalError(res, "QUERY_FAILED", error);
   res.json(data);
 }
 
 export async function getDashboardStats(_req: Request, res: Response) {
   const { data, error } = await supabase.rpc("affiliate_get_dashboard_stats");
-  if (error) return res.status(500).json({ error: { code: "QUERY_FAILED", message: error.message } });
+  if (error) return internalError(res, "QUERY_FAILED", error);
   res.json(data);
 }

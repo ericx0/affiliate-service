@@ -3,6 +3,7 @@ import { logger } from "../../utils/logger.js";
 import { approveExpiredCooldowns } from "../commissions/commissions.service.js";
 import { payCommissions } from "../payouts/payouts.service.js";
 import { supabase } from "../../config.js";
+import { internalError } from "../../utils/controller-error.js";
 
 const cronRouter = Router();
 
@@ -27,7 +28,7 @@ cronRouter.get("/approve-cooldown", async (_req, res) => {
     return res.json({ success: true, approved });
   } catch (err: any) {
     logger.error({ err }, "Cron: approve-cooldown failed");
-    return res.status(500).json({ error: err.message });
+    return internalError(res, "CRON_FAILED", err);
   }
 });
 
@@ -50,7 +51,7 @@ cronRouter.get("/monthly-payout", async (_req, res) => {
     return res.json({ success: true, total: results.length, successful });
   } catch (err: any) {
     logger.error({ err }, "Cron: monthly-payout failed");
-    return res.status(500).json({ error: err.message });
+    return internalError(res, "CRON_FAILED", err);
   }
 });
 

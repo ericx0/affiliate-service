@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { supabase } from "../../config.js";
+import { internalError } from "../../utils/controller-error.js";
 
 /**
  * GET /me/stats — 5 stat cards for the dashboard overview.
@@ -15,7 +16,7 @@ export async function getMyStats(req: Request, res: Response) {
     p_promoter_id: promoterId,
   });
   if (error) {
-    res.status(500).json({ error: { code: "QUERY_FAILED", message: error.message } });
+    internalError(res, "QUERY_FAILED", error);
     return;
   }
   res.json(data ?? { totalPaid: 0, totalPending: 0, totalApproved: 0, totalClicks: 0, activeCodes: 0 });
@@ -35,7 +36,7 @@ export async function getMyEarnings(req: Request, res: Response) {
     p_promoter_id: promoterId,
   });
   if (error) {
-    res.status(500).json({ error: { code: "QUERY_FAILED", message: error.message } });
+    internalError(res, "QUERY_FAILED", error);
     return;
   }
   res.json({ data: data ?? [] });
@@ -55,7 +56,7 @@ export async function getMyCodes(req: Request, res: Response) {
     p_promoter_id: promoterId,
   });
   if (error) {
-    res.status(500).json({ error: { code: "QUERY_FAILED", message: error.message } });
+    internalError(res, "QUERY_FAILED", error);
     return;
   }
   res.json({ data: data ?? [] });
@@ -75,7 +76,7 @@ export async function getMyPayouts(req: Request, res: Response) {
     p_promoter_id: promoterId,
   });
   if (error) {
-    res.status(500).json({ error: { code: "QUERY_FAILED", message: error.message } });
+    internalError(res, "QUERY_FAILED", error);
     return;
   }
   res.json({ data: data ?? [] });
@@ -95,7 +96,7 @@ export async function getMe(req: Request, res: Response) {
     p_promoter_id: promoterId,
   });
   if (error) {
-    res.status(500).json({ error: { code: "QUERY_FAILED", message: error.message } });
+    internalError(res, "QUERY_FAILED", error);
     return;
   }
   res.json({ data: data ?? null });

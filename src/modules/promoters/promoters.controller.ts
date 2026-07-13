@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { z } from "zod";
 import { supabase } from "../../config.js";
 import { logger } from "../../utils/logger.js";
+import { internalError } from "../../utils/controller-error.js";
 
 const CreatePromoterSchema = z.object({
   name: z.string().min(1),
@@ -30,7 +31,7 @@ export async function createPromoter(req: Request, res: Response) {
 
   if (error) {
     logger.error({ err: error }, "createPromoter failed");
-    return res.status(500).json({ error: { code: "CREATE_FAILED", message: error.message } });
+    return internalError(res, "CREATE_FAILED", error);
   }
 
   logger.info({ promoterId: data?.id, code: data?.code }, "promoter created");

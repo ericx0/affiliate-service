@@ -1,5 +1,7 @@
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import pinoHttp from "pino-http";
 import { env } from "./config.js";
 import { logger } from "./utils/logger.js";
@@ -26,6 +28,25 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization", "X-TOTP-Code"],
   credentials: false,
 }));
+
+// Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc).
+// Skip for the Stripe webhook — it doesn't need these and Stripe's
+// content-type detection stays correct.
+app.use((req, res, next) => {
+  if (req.path === "/webhooks/stripe") return next();
+  return helmet()(req, res, next);
+});
+
+// Rate limit login / TOTP-verify / register endpoints (the brute-force
+// targets). express-rate-limit is in-memory per process; on Vercel
+// serverless multiple instances means effective limit is N× — acceptable
+// for low-stakes auth (TOTP is the real defence), tighten if abuse.
+const authLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 10, // 10 requests / minute / IP per route prefix
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+});
 
 app.use(pinoHttp({ logger }));
 
@@ -58,11 +79,11 @@ app.get("/health", (_req, res) => res.json({ status: "ok", service: "affiliate-s
 //   /api/affiliate/me/*           — KOL self-service (dashboard data)
 //   /api/affiliate/auth/register  — KOL self-registration (signed in, email-verified)
 app.use("/api/affiliate/orders", hmacMiddleware(env.LCM_AFFILIATE_SECRET), ordersRouter);
-app.use("/api/affiliate/admin", adminRouter);   // adminAuthMiddleware inside adminRouter
-app.use("/api/affiliate/promoters", promotersRouter);  // adminAuthMiddleware inside promotersRouter
-app.use("/api/affiliate/auth/admin", adminAuthRouter);
-app.use("/api/affiliate/me", meRouter);
-app.use("/api/affiliate/auth/register", registerRouter);
+app.use("/api/affiliate/admin", authLimiter, adminRouter);   // adminAuthMiddleware inside adminRouter
+app.use("/api/affiliate/promoters", authLimiter, promotersRouter);  // adminAuthMiddleware inside promotersRouter
+app.use("/api/affiliate/auth/admin", authLimiter, adminAuthRouter);
+app.use("/api/affiliate/me", authLimiter, meRouter);
+app.use("/api/affiliate/auth/register", authLimiter, registerRouter);
 app.use("/api/affiliate/cron", cronRouter);
 
 app.use(errorHandler);

@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { z } from "zod";
 import { supabase } from "../../config.js";
+import { internalError } from "../../utils/controller-error.js";
 
 const SelfRegisterSchema = z.object({
   authUserId: z.string().uuid("Invalid authUserId"),
@@ -72,7 +73,7 @@ export async function selfRegister(req: Request, res: Response) {
       });
       return;
     }
-    res.status(500).json({ error: { code: "REGISTER_FAILED", message: error.message } });
+    internalError(res, "REGISTER_FAILED", error);
     return;
   }
 
