@@ -6,7 +6,7 @@ import {
   CommissionStatus,
   CreateCommissionInput,
   TransitionResult,
-  canTransition,
+  VALID_TRANSITIONS,
 } from "./commissions.types.js";
 
 const COOL_DOWN_DAYS = 7;
@@ -58,6 +58,20 @@ export async function attachToOrder(input: CreateCommissionInput): Promise<Trans
     .single();
 
   if (error) {
+    // A concurrent insert won the race and tripped the
+    // UNIQUE(order_id, commission_type) constraint. Treat as idempotent:
+    // fetch and return the row the other request created.
+    if (error.code === "23505") {
+      const { data: raced } = await supabase
+        .from("commissions")
+        .select("*")
+        .eq("order_id", validated.orderId)
+        .eq("commission_type", validated.commissionType)
+        .single();
+      if (raced) {
+        return { success: true, commission: raced as Commission };
+      }
+    }
     logger.error({ error, input }, "failed to create commission");
     return { success: false, error: error.message };
   }
@@ -68,26 +82,25 @@ export async function attachToOrder(input: CreateCommissionInput): Promise<Trans
 
 /**
  * Transition a commission to a new status. Validates state machine.
- * Uses row-level lock to prevent concurrent transitions.
+ *
+ * ATOMIC: uses a conditional UPDATE that requires the current status to be
+ * one of the valid predecessors of `toStatus`. If a concurrent transition
+ * (or retry) has already moved the row, the affected-row count is 0 and we
+ * report failure — never overwriting the new state.
  */
 export async function transition(
   commissionId: string,
   toStatus: CommissionStatus,
   metadata: Record<string, any> = {}
 ): Promise<TransitionResult> {
-  const { data: current, error: fetchErr } = await supabase
-    .from("commissions")
-    .select("*")
-    .eq("id", commissionId)
-    .single();
+  // Invert VALID_TRANSITIONS to find all states from which `toStatus` is
+  // reachable in one step.
+  const validSources = (Object.entries(VALID_TRANSITIONS) as [CommissionStatus, CommissionStatus[]][])
+    .filter(([, targets]) => targets.includes(toStatus))
+    .map(([from]) => from);
 
-  if (fetchErr || !current) {
-    return { success: false, error: "Commission not found" };
-  }
-
-  if (!canTransition(current.status as CommissionStatus, toStatus)) {
-    logger.warn({ commissionId, from: current.status, to: toStatus }, "invalid state transition");
-    return { success: false, error: `Cannot transition from ${current.status} to ${toStatus}` };
+  if (validSources.length === 0) {
+    return { success: false, error: `No valid source state for ${toStatus}` };
   }
 
   const now = new Date().toISOString();
@@ -110,15 +123,33 @@ export async function transition(
     .from("commissions")
     .update(updates)
     .eq("id", commissionId)
+    .in("status", validSources)
     .select()
     .single();
 
-  if (error) {
-    logger.error({ error, commissionId, toStatus }, "failed to transition commission");
-    return { success: false, error: error.message };
+  if (error || !data) {
+    // Either the row doesn't exist or its current status isn't in
+    // validSources (already moved by a concurrent caller). Distinguish so
+    // the caller can decide whether to retry.
+    const { data: existing } = await supabase
+      .from("commissions")
+      .select("status")
+      .eq("id", commissionId)
+      .maybeSingle();
+    if (!existing) {
+      return { success: false, error: "Commission not found" };
+    }
+    logger.warn(
+      { commissionId, attemptedTo: toStatus, currentStatus: existing.status },
+      "commission transition rejected (concurrent or invalid state)",
+    );
+    return {
+      success: false,
+      error: `Cannot transition from ${existing.status} to ${toStatus}`,
+    };
   }
 
-  logger.info({ commissionId, from: current.status, to: toStatus }, "commission transitioned");
+  logger.info({ commissionId, to: toStatus }, "commission transitioned");
   return { success: true, commission: data as Commission };
 }
 
@@ -172,11 +203,17 @@ export async function reversePaidCommission(
   }
 
   try {
-    // Reverse the Stripe transfer
-    await stripe.transfers.createReversal(commission.stripe_transfer_id, {
-      amount: Math.round(commission.commission_amount * 100),  // cents
-      metadata: { commissionId, reason },
-    });
+    // Reverse the Stripe transfer. Idempotency key prevents double-reversal
+    // (e.g. retry of this endpoint after a transient failure between the
+    // Stripe call and the DB transition) from withdrawing twice.
+    await stripe.transfers.createReversal(
+      commission.stripe_transfer_id,
+      {
+        amount: Math.round(commission.commission_amount * 100),  // cents
+        metadata: { commissionId, reason },
+      },
+      { idempotencyKey: `commission-reverse-${commissionId}` },
+    );
 
     // Mark as reversed
     return await transition(commissionId, "reversed", { refund_reason: reason });

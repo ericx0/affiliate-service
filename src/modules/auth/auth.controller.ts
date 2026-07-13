@@ -110,6 +110,36 @@ export async function disableTotp(req: Request, res: Response) {
     return;
   }
 
+  // Require a valid current TOTP code to disable 2FA. This route is behind
+  // JWT only (not the per-request TOTP check), so without this a stolen JWT
+  // could switch 2FA off.
+  const code =
+    (req.headers["x-totp-code"] as string) || (req.body?.code as string) || "";
+  if (!/^\d{6}$/.test(code)) {
+    res.status(400).json({
+      error: {
+        code: "TOTP_REQUIRED",
+        message: "A valid 6-digit TOTP code is required to disable 2FA",
+      },
+    });
+    return;
+  }
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("totp_secret, totp_enabled")
+    .eq("id", user.id)
+    .single();
+  if (
+    !profile?.totp_enabled ||
+    !profile.totp_secret ||
+    !verifyTotp(profile.totp_secret, code)
+  ) {
+    res.status(401).json({
+      error: { code: "INVALID_TOTP", message: "Invalid TOTP code" },
+    });
+    return;
+  }
+
   const { error } = await supabase
     .from("profiles")
     .update({ totp_secret: null, totp_enabled: false })

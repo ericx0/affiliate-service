@@ -38,16 +38,21 @@ export async function paySingleCommission(commissionId: string): Promise<PayoutR
   const amountCents = Math.round(commission.commission_amount * 100);
 
   try {
-    const transfer = await stripe.transfers.create({
-      amount: amountCents,
-      currency: commission.currency.toLowerCase(),
-      destination: promoter.stripe_account_id,
-      metadata: {
-        commissionId: commission.id,
-        promoterId: commission.promoter_id,
-        type: "affiliate_commission",
+    const transfer = await stripe.transfers.create(
+      {
+        amount: amountCents,
+        currency: commission.currency.toLowerCase(),
+        destination: promoter.stripe_account_id,
+        metadata: {
+          commissionId: commission.id,
+          promoterId: commission.promoter_id,
+          type: "affiliate_commission",
+        },
       },
-    });
+      // Stripe guarantees at-most-once per key: concurrent calls or retries
+      // for the same commission return the SAME transfer — no double payout.
+      { idempotencyKey: `commission-payout-${commission.id}` },
+    );
 
     // Transition to paid
     const result = await transition(commission.id, "paid", {

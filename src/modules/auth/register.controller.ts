@@ -46,6 +46,15 @@ export async function selfRegister(req: Request, res: Response) {
     return;
   }
 
+  // Critical: body.authUserId MUST be the caller's own id — otherwise a
+  // caller could link a promoter row to a different auth user's id.
+  if (body.authUserId !== user.id) {
+    res.status(403).json({
+      error: { code: "USER_MISMATCH", message: "authUserId does not match the authenticated user" },
+    });
+    return;
+  }
+
   const { data, error } = await supabase.rpc("affiliate_self_register_promoter", {
     p_auth_user_id: body.authUserId,
     p_name: body.name,

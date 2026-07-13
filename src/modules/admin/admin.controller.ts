@@ -5,10 +5,16 @@ import { logger } from "../../utils/logger.js";
 import { paySingleCommission, payCommissions } from "../payouts/payouts.service.js";
 import { writeAuditLog } from "./audit.service.js";
 
-const adminCtx = (req: Request) => ({
-  adminId: (req as any).adminId || "00000000-0000-0000-0000-000000000000",
-  adminEmail: (req as any).adminEmail || "unknown@linkchinamed.com",
-});
+// Read the real admin identity that adminAuthMiddleware attaches. Previously
+// this read req.adminId / req.adminEmail (never set) and silently logged
+// all admin actions as 0000.../unknown@linkchinamed.com.
+const adminCtx = (req: Request) => {
+  const u = (req as any).adminUser;
+  return {
+    adminId: u?.id || "00000000-0000-0000-0000-000000000000",
+    adminEmail: u?.email || "unknown@linkchinamed.com",
+  };
+};
 
 // ============================================================
 // PAYOUT endpoints (Phase 3) — unchanged

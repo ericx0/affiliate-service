@@ -8,8 +8,13 @@ const cronRouter = Router();
 
 // Ensure the request comes from Vercel Cron
 cronRouter.use((req, res, next) => {
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cronSecret) {
+    logger.error("CRON_SECRET is not configured — refusing all cron requests");
+    return res.status(503).json({ error: "Cron not configured" });
+  }
   const authHeader = req.headers.authorization;
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (authHeader !== `Bearer ${cronSecret}`) {
     logger.warn("Unauthorized attempt to hit cron endpoint");
     return res.status(401).json({ error: "Unauthorized" });
   }
