@@ -40,7 +40,10 @@ export async function attachToOrder(input: CreateCommissionInput): Promise<Trans
     return { success: true, commission: existing as Commission };
   }
 
-  const commissionAmount = (validated.orderAmount * validated.commissionRate) / 100;
+  // Cents: integer math, rounding to handle non-integer rate * order.
+  const commissionAmount = Math.round(
+    (validated.orderAmount * validated.commissionRate) / 100,
+  );
 
   const { data, error } = await supabase
     .from("commissions")
@@ -209,7 +212,7 @@ export async function reversePaidCommission(
     await stripe.transfers.createReversal(
       commission.stripe_transfer_id,
       {
-        amount: Math.round(commission.commission_amount * 100),  // cents
+        amount: commission.commission_amount,  // already cents
         metadata: { commissionId, reason },
       },
       { idempotencyKey: `commission-reverse-${commissionId}` },

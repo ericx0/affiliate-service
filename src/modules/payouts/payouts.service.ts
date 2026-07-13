@@ -37,7 +37,8 @@ export async function paySingleCommission(commissionId: string): Promise<PayoutR
     return { success: false, error: "Promoter Stripe Connect not set up" };
   }
 
-  const amountCents = Math.round(commission.commission_amount * 100);
+  // commission_amount is already in cents (integer).
+  const amountCents = commission.commission_amount;
 
   try {
     const transfer = await stripe.transfers.create(
@@ -112,7 +113,8 @@ export async function payPromoterGroup(
     return { success: false, error: "Promoter Stripe Connect not set up" };
   }
 
-  const amountCents = Math.round(totalAmount * 100);
+  // totalAmount is already in cents (integer).
+  const amountCents = totalAmount;
 
   try {
     const transfer = await stripe.transfers.create(

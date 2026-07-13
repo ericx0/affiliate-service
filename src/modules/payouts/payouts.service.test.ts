@@ -66,12 +66,12 @@ describe("payPromoterGroup — F29 regression", () => {
       "p1",
       "USD",
       ["c1", "c2", "c3"],
-      240, // group total
+      24000, // group total in cents
     );
     expect(result.success).toBe(true);
     expect(mockState.stripeTransfersCreate).toHaveBeenCalledTimes(1);
     const [args, opts] = mockState.stripeTransfersCreate.mock.calls[0];
-    expect(args.amount).toBe(24000); // cents
+    expect(args.amount).toBe(24000); // cents (no *100)
     expect(args.destination).toBe("acct_1");
     expect(args.metadata.commissionIds).toBe("c1,c2,c3");
     expect(args.metadata.promoterId).toBe("p1");
@@ -79,33 +79,33 @@ describe("payPromoterGroup — F29 regression", () => {
   });
 
   it("transitions EVERY commission in the group to paid", async () => {
-    await payPromoterGroup("p1", "USD", ["c1", "c2", "c3"], 240);
+    await payPromoterGroup("p1", "USD", ["c1", "c2", "c3"], 24000);
     expect(mockState.transitions.length).toBe(3);
     expect(mockState.transitions.map((t) => t.id).sort()).toEqual(["c1", "c2", "c3"]);
     expect(mockState.transitions.every((t) => t.to === "paid")).toBe(true);
   });
 
   it("uses the same transfer id on all commission transitions", async () => {
-    await payPromoterGroup("p1", "USD", ["c1", "c2"], 80);
+    await payPromoterGroup("p1", "USD", ["c1", "c2"], 8000);
     const transferIds = new Set(mockState.transitions.map((t) => t.metadata.stripe_transfer_id));
     expect(transferIds.size).toBe(1);
     expect(transferIds.has("tr_123")).toBe(true);
   });
 
   it("is idempotent: same commission set => same idempotency key", async () => {
-    await payPromoterGroup("p1", "USD", ["c2", "c1"], 80);
+    await payPromoterGroup("p1", "USD", ["c2", "c1"], 8000);
     const key1 = mockState.stripeTransfersCreate.mock.calls[0][1].idempotencyKey;
     mockState.stripeTransfersCreate.mockClear();
-    await payPromoterGroup("p1", "USD", ["c1", "c2"], 80);
+    await payPromoterGroup("p1", "USD", ["c1", "c2"], 8000);
     const key2 = mockState.stripeTransfersCreate.mock.calls[0][1].idempotencyKey;
     expect(key1).toBe(key2);
   });
 
   it("different commission set => different idempotency key", async () => {
-    await payPromoterGroup("p1", "USD", ["c1"], 40);
+    await payPromoterGroup("p1", "USD", ["c1"], 4000);
     const key1 = mockState.stripeTransfersCreate.mock.calls[0][1].idempotencyKey;
     mockState.stripeTransfersCreate.mockClear();
-    await payPromoterGroup("p1", "USD", ["c1", "c2"], 80);
+    await payPromoterGroup("p1", "USD", ["c1", "c2"], 8000);
     const key2 = mockState.stripeTransfersCreate.mock.calls[0][1].idempotencyKey;
     expect(key1).not.toBe(key2);
   });
@@ -115,38 +115,38 @@ describe("payPromoterGroup — F29 regression", () => {
       stripe_account_id: null,
       stripe_onboarding_completed: false,
     });
-    const result = await payPromoterGroup("p2", "USD", ["c1"], 40);
+    const result = await payPromoterGroup("p2", "USD", ["c1"], 4000);
     expect(result.success).toBe(false);
     expect(mockState.stripeTransfersCreate).not.toHaveBeenCalled();
   });
 
-  it("rounds total to cents correctly", async () => {
-    await payPromoterGroup("p1", "USD", ["c1", "c2"], 99.995);
+  it("passes integer cents through unchanged", async () => {
+    await payPromoterGroup("p1", "USD", ["c1", "c2"], 10000);
     expect(mockState.stripeTransfersCreate.mock.calls[0][0].amount).toBe(10000);
   });
 });
 
 describe("groupCommissionsByPromoter", () => {
-  it("groups approved commissions by promoter_id", () => {
+  it("groups approved commissions by promoter_id (amounts in cents)", () => {
     const commissions = [
-      { id: "c1", promoter_id: "p1", commission_amount: 50, currency: "USD" },
-      { id: "c2", promoter_id: "p1", commission_amount: 30, currency: "USD" },
-      { id: "c3", promoter_id: "p2", commission_amount: 100, currency: "USD" },
+      { id: "c1", promoter_id: "p1", commission_amount: 5000, currency: "USD" },
+      { id: "c2", promoter_id: "p1", commission_amount: 3000, currency: "USD" },
+      { id: "c3", promoter_id: "p2", commission_amount: 10000, currency: "USD" },
     ];
     const groups = groupCommissionsByPromoter(commissions as any);
     expect(groups.size).toBe(2);
-    expect(groups.get("p1")?.total).toBe(80);
-    expect(groups.get("p2")?.total).toBe(100);
+    expect(groups.get("p1")?.total).toBe(8000);
+    expect(groups.get("p2")?.total).toBe(10000);
     expect(groups.get("p1")?.commissionIds).toEqual(["c1", "c2"]);
   });
 
   it("handles different currencies separately", () => {
     const commissions = [
-      { id: "c1", promoter_id: "p1", commission_amount: 50, currency: "USD" },
-      { id: "c2", promoter_id: "p1", commission_amount: 30, currency: "EUR" },
+      { id: "c1", promoter_id: "p1", commission_amount: 5000, currency: "USD" },
+      { id: "c2", promoter_id: "p1", commission_amount: 3000, currency: "EUR" },
     ];
     const groups = groupCommissionsByPromoter(commissions as any);
-    expect(groups.get("p1")?.total).toBe(80);
+    expect(groups.get("p1")?.total).toBe(8000);
   });
 });
 

@@ -326,7 +326,8 @@ export async function reverseCommission(req: Request, res: Response) {
     const Stripe = (await import("stripe")).default;
     const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
     await stripe.transfers.createReversal(current.stripe_transfer_id, {
-      amount: Math.round(Number(current.commission_amount) * 100),
+      // commission_amount is already in cents (integer).
+      amount: Number(current.commission_amount),
       metadata: { commissionId: id, reason, reversedBy: ctx.adminEmail },
     });
   } catch (stripeErr: any) {

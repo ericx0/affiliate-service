@@ -32,9 +32,9 @@ export function groupCommissionsByPromoter(commissions: CommissionForPayout[]): 
     }
   }
 
-  // Round totals
+  // Totals are now in cents (integer), no rounding needed.
   for (const group of groups.values()) {
-    group.total = Math.round(group.total * 100) / 100;
+    group.total = Math.round(group.total);
   }
 
   return groups;

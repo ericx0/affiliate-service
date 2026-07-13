@@ -65,7 +65,7 @@ AS $$
     SELECT
       c.id::text                                       AS id,
       to_char(c.created_at, 'YYYY-MM-DD')             AS date,
-      c.commission_amount::float8                      AS "amountUsd",
+      c.commission_amount                      AS "amountCents",
       CASE
         WHEN c.status IN ('cooling_down','pending') THEN 'pending'
         WHEN c.status = 'approved'                  THEN 'approved'
@@ -139,7 +139,7 @@ AS $$
     SELECT
       c.stripe_transfer_id                AS id,
       MAX(c.paid_at)::text                 AS "paidAt",
-      SUM(c.commission_amount)::float8    AS "amountUsd",
+      SUM(c.commission_amount)    AS "amountCents",
       'stripe'                            AS method,
       c.stripe_transfer_id                AS "stripeTransferId",
       COUNT(*)::int                       AS "earningsCount"
