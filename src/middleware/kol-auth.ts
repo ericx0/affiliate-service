@@ -65,11 +65,36 @@ export const kolAuthMiddleware: RequestHandler = async (req, res, next) => {
     return;
   }
 
-  // Look up promoter row by email
-  const { data: promoterRows, error: promoterErr } = await supabase.rpc(
-    "affiliate_get_promoter_by_email",
-    { p_email: user.email }
-  );
+  // AS-P1-8 fix: look up promoter row by auth_user_id (stable) first,
+  // fall back to email (legacy — pre-auth_user_id migrations). Once
+  // the backfill has run (20260714000032) every active promoter has
+  // a populated auth_user_id and the email fallback is only used for
+  // any pre-backfill orphan rows.
+  const { data: promoterByAuthId } = await supabase
+    .from("affiliate.promoters")
+    .select("*")
+    .eq("auth_user_id", user.id)
+    .maybeSingle();
+  let promoterRows: unknown[] | null = promoterByAuthId
+    ? [promoterByAuthId]
+    : null;
+
+  if (!promoterRows) {
+    const { data: byEmail, error: promoterErr } = await supabase.rpc(
+      "affiliate_get_promoter_by_email",
+      { p_email: user.email }
+    );
+    if (promoterErr) {
+      // AS-P1-1 fix: never return raw RPC error to client. PostgREST
+      // errors can leak table/column names, function signatures, internal
+      // UUIDs, or RPC stack traces — useful reconnaissance for an
+      // attacker probing the surface. Log internally; return generic.
+      logger.error({ err: promoterErr }, "kol-auth RPC failed");
+      internalError(res, "QUERY_FAILED", promoterErr);
+      return;
+    }
+    promoterRows = (byEmail as unknown[]) ?? null;
+  }
 
   if (promoterErr) {
     // AS-P1-1 fix: never return raw RPC error to client. PostgREST
