@@ -44,8 +44,13 @@ export async function setupTotp(req: Request, res: Response) {
     reason: "User initiated TOTP setup",
   });
 
+  // AS-P1-7 fix: do NOT return the raw TOTP secret in the response.
+  // Anyone intercepting the response (browser extension, XSS,
+  // compromised CDN, MITM if TLS downgrades) would have full
+  // 2FA bypass. The otpauth_url is sufficient for the standard
+  // QR-code enrollment flow; users who need manual entry can extract
+  // the secret from the otpauth:// URL locally on their own device.
   res.json({
-    secret, // Show so user can manually enter if QR scan fails
     otpauth_url: otpauthUrl,
     instructions: "Scan the otpauth_url QR with Google Authenticator, then call POST /auth/admin/2fa/verify with the 6-digit code to enable.",
   });
