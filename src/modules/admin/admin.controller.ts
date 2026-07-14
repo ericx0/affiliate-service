@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { z } from "zod";
-import { supabase } from "../../config.js";
+import { supabase, stripe } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { paySingleCommission, payCommissions } from "../payouts/payouts.service.js";
 import { writeAuditLog } from "./audit.service.js";
@@ -321,18 +321,31 @@ export async function reverseCommission(req: Request, res: Response) {
     return res.status(400).json({ error: { code: "NO_TRANSFER" } });
   }
 
-  // Reverse via Stripe
+  // Reverse via Stripe.
+  // AS-P1-2 fix: use the validated, env-checked Stripe client imported
+  // at module scope (carries apiVersion + httpClient). The previous
+  // dynamic-import + `process.env.STRIPE_SECRET_KEY || ""` would
+  // silently construct a Stripe client with an empty key if env was
+  // not loaded into process.env at request time, returning
+  // `stripeErr.message` to the client (a Stripe internal error
+  // string — recon leak).
   try {
-    const Stripe = (await import("stripe")).default;
-    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
-    await stripe.transfers.createReversal(current.stripe_transfer_id, {
-      // commission_amount is already in cents (integer).
-      amount: Number(current.commission_amount),
-      metadata: { commissionId: id, reason, reversedBy: ctx.adminEmail },
+    await stripe.transfers.createReversal(
+      current.stripe_transfer_id,
+      {
+        amount: Number(current.commission_amount),
+        metadata: { commissionId: id, reason, reversedBy: ctx.adminEmail },
+      },
+      // Idempotency: duplicate reversal requests for the same commission
+      // collapse to one Stripe call (P0 audit context).
+      { idempotencyKey: `commission-reverse-${id}` },
+    );
+  } catch (stripeErr: unknown) {
+    logger.error({ err: stripeErr, id }, "Stripe reversal failed");
+    // Do NOT leak Stripe error message to client.
+    return res.status(502).json({
+      error: { code: "STRIPE_FAILED", message: "Stripe reversal failed" },
     });
-  } catch (stripeErr: any) {
-    logger.error({ stripeErr, id }, "Stripe reversal failed");
-    return res.status(502).json({ error: { code: "STRIPE_FAILED", message: stripeErr.message } });
   }
 
   // Mark reversed via RPC

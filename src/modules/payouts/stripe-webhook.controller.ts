@@ -17,8 +17,12 @@ export async function handleStripeWebhook(req: Request, res: Response) {
       env.STRIPE_WEBHOOK_SECRET
     );
   } catch (err) {
+    // AS-P1-3 fix: do NOT return the raw Stripe SDK error to the
+    // caller. Error strings can include HTTP body fragments, internal
+    // Stripe endpoints, or hints about secret names. Log internally;
+    // return a generic 400.
     logger.error({ err }, "Stripe webhook signature verification failed");
-    return res.status(400).send(`Webhook Error: ${(err as Error).message}`);
+    return res.status(400).send("Webhook signature verification failed");
   }
 
   switch (event.type) {

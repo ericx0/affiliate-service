@@ -2,6 +2,7 @@ import { RequestHandler } from "express";
 import { createClient } from "@supabase/supabase-js";
 import { env } from "../config.js";
 import { supabase } from "../config.js";
+import { internalError } from "../utils/controller-error.js";
 
 /**
  * KOL self-service authentication middleware.
@@ -71,7 +72,12 @@ export const kolAuthMiddleware: RequestHandler = async (req, res, next) => {
   );
 
   if (promoterErr) {
-    res.status(500).json({ error: { code: "QUERY_FAILED", message: promoterErr.message } });
+    // AS-P1-1 fix: never return raw RPC error to client. PostgREST
+    // errors can leak table/column names, function signatures, internal
+    // UUIDs, or RPC stack traces — useful reconnaissance for an
+    // attacker probing the surface. Log internally; return generic.
+    logger.error({ err: promoterErr }, "kol-auth RPC failed");
+    internalError(res, "QUERY_FAILED", promoterErr);
     return;
   }
 

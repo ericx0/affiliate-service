@@ -126,10 +126,28 @@ export const adminAuthMiddleware: RequestHandler = async (req, res, next) => {
 
 /**
  * Role-based authorization. Use AFTER adminAuthMiddleware.
- * (Currently we only have a binary is_admin flag; future enhancement.)
+ *
+ * AS-P2-1 fix: the previous version was a no-op (just called next())
+ * — anyone wiring `requireRole(['admin'])` thinking it was a real check
+ * would silently let through. Now: verify adminUser.is_admin === true.
+ * Add per-role gating when profiles.role enum is reliably populated.
  */
-export function requireRole(_roles: string[]) {
-  return (_req: Request, _res: Response, next: NextFunction) => {
+export function requireRole(roles: string[]) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const user = (req as { adminUser?: { isAdmin?: boolean; role?: string } }).adminUser;
+    if (!user) {
+      res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Admin auth required" } });
+      return;
+    }
+    if (!user.isAdmin && (!user.role || !roles.includes(user.role))) {
+      res.status(403).json({
+        error: {
+          code: "FORBIDDEN",
+          message: `Requires one of roles: ${roles.join(", ")}`,
+        },
+      });
+      return;
+    }
     next();
   };
 }
