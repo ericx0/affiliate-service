@@ -6,6 +6,24 @@ import { paySingleCommission, payCommissions } from "../payouts/payouts.service.
 import { writeAuditLog } from "./audit.service.js";
 import { internalError } from "../../utils/controller-error.js";
 
+// AS-P2-7: commission_amount is stored as bigint (cents). Converting to
+// JS number loses precision above 2^53 (~9e15 cents = ~$9e13). At
+// realistic KOL payout scales ($1M = 1e8 cents) this is irrelevant;
+// we cap at a sensible ceiling and throw if exceeded.
+const MAX_SAFE_COMMISSION_CENTS = Number.MAX_SAFE_INTEGER; // 2^53 - 1
+function assertCommissionAmountSafe(amount: unknown): number {
+  const n = typeof amount === "string" ? Number(amount) : Number(amount);
+  if (!Number.isFinite(n)) {
+    throw new Error(`Invalid commission_amount: ${String(amount)}`);
+  }
+  if (Math.abs(n) > MAX_SAFE_COMMISSION_CENTS) {
+    throw new Error(
+      `commission_amount ${n} exceeds MAX_SAFE_INTEGER; manual intervention required`,
+    );
+  }
+  return n;
+}
+
 // Read the real admin identity that adminAuthMiddleware attaches. Previously
 // this read req.adminId / req.adminEmail (never set) and silently logged
 // all admin actions as 0000.../unknown@linkchinamed.com.
@@ -333,7 +351,12 @@ export async function reverseCommission(req: Request, res: Response) {
     await stripe.transfers.createReversal(
       current.stripe_transfer_id,
       {
-        amount: Number(current.commission_amount),
+        // AS-P2-7 fix: commission_amount is bigint (cents). Stripe's
+        // TS SDK expects number for `amount`. BigInt values > 2^53
+        // (≈ $90 trillion in cents) would lose precision via Number()
+        // cast. Add an explicit cap and assert within safe range; log
+        // and refuse if a row is somehow beyond that.
+        amount: assertCommissionAmountSafe(current.commission_amount),
         metadata: { commissionId: id, reason, reversedBy: ctx.adminEmail },
       },
       // Idempotency: duplicate reversal requests for the same commission
