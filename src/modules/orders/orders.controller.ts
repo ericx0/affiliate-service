@@ -50,6 +50,13 @@ const OrderEventSchema = z.object({
   refundAmount: z.number().nonnegative().optional(),
 });
 
+const RefundEventSchema = z.object({
+  eventId: z.string().min(1).max(200),
+  orderId: z.string().uuid(),
+  reason: z.string().optional(),
+  refundAmount: z.number().nonnegative().optional(),
+});
+
 async function getCommissionsForOrder(orderId: string) {
   const { data } = await supabase
     .from("commissions")
@@ -100,34 +107,69 @@ export async function onOrderCompleted(req: Request, res: Response) {
 }
 
 export async function onOrderRefunded(req: Request, res: Response) {
-  const { orderId, reason, refundAmount } = OrderEventSchema.parse(req.body);
+  const { eventId, orderId, reason, refundAmount } = RefundEventSchema.parse(req.body);
 
-  const commissions = await getCommissionsForOrder(orderId);
-  let count = 0;
-
-  for (const c of commissions) {
-    if (c.status === "refunded" || c.status === "reversed") continue;
-
-    // partial refund: adjust amount; full refund: mark refunded
-    const isPartial = refundAmount && refundAmount < c.order_amount;
-
-    if (isPartial) {
-      const ratio = (c.order_amount - refundAmount) / c.order_amount;
-      const newCommission = c.commission_amount * ratio;
-      await supabase
-        .from("commissions")
-        .update({
-          commission_amount: newCommission,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", c.id);
-    } else {
-      await transition(c.id, "refunded", { refund_reason: reason || "Customer refund" });
+  // 1. Idempotency: atomically claim the eventId. Conflict = already
+  //    processed this event — return success without re-applying.
+  const { error: claimErr } = await supabase.from("refund_events").insert({
+    event_id: eventId,
+    order_id: orderId,
+    refund_amount: refundAmount ?? null,
+    reason: reason ?? null,
+  });
+  if (claimErr) {
+    if (claimErr.code === "23505") {
+      logger.info({ eventId, orderId }, "refund event already processed");
+      return res.json({ success: true, duplicate: true });
     }
-    count++;
+    logger.error({ err: claimErr, eventId }, "refund event claim failed");
+    return internalError(res, "REFUND_EVENT_CLAIM_FAILED", { message: claimErr.message });
   }
 
-  logger.info({ orderId, count, refundAmount }, "order refunded event processed");
+  // 2. AS-P1-5: For now, only support FULL refunds. Partial refund
+  //    requires cumulative tracking on commissions (cumulative_refunded
+  //    column) that does not yet exist — would otherwise allow compound
+  //    reduction on replay. Reject partial explicitly so callers know.
+  const commissions = await getCommissionsForOrder(orderId);
+  if (commissions.length === 0) {
+    logger.info({ orderId }, "no commissions to refund");
+    return res.json({ success: true, commissionsAffected: 0 });
+  }
+
+  const isPartial = commissions.some(
+    (c) => refundAmount !== undefined && refundAmount < c.order_amount,
+  );
+  if (isPartial) {
+    logger.warn(
+      { orderId, refundAmount },
+      "partial refund rejected — cumulative tracking not yet implemented",
+    );
+    return res.status(501).json({
+      error: {
+        code: "PARTIAL_REFUND_UNSUPPORTED",
+        message: "Partial refunds require cumulative tracking migration; not yet implemented.",
+      },
+    });
+  }
+
+  let count = 0;
+  for (const c of commissions) {
+    // Idempotency at the commission level: skip rows already in a
+    // terminal-refund state. transition() also enforces source-state
+    // CAS, but the explicit skip is clearer and avoids an unnecessary
+    // UPDATE round-trip.
+    if (c.status === "refunded" || c.status === "reversed") continue;
+
+    const result = await transition(c.id, "refunded", {
+      refund_reason: reason || "Customer refund",
+    });
+    if (result.success) count++;
+  }
+
+  logger.info(
+    { eventId, orderId, count, refundAmount },
+    "order refunded event processed",
+  );
   res.json({ success: true, commissionsAffected: count });
 }
 
