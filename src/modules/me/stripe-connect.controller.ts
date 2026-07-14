@@ -32,12 +32,21 @@ export async function postMyStripeConnect(req: Request, res: Response) {
     .single();
   const existingAccountId = p?.stripe_account_id ?? null;
 
-  // Dev fallback path: skip Stripe API, mark promoter and return mock URL
-  if (
-    !env.STRIPE_SECRET_KEY ||
-    env.STRIPE_SECRET_KEY.startsWith("PLACEHOLDER") ||
-    env.STRIPE_SECRET_KEY === "sk_test_PLACEHOLDER"
-  ) {
+  // AS-P2-4 fix: dev-mock fallback is now gated on NODE_ENV. The
+  // previous condition (missing key OR starts with PLACEHOLDER) would
+  // silently activate a /dev/stripe-mock URL in production if the env
+  // was misconfigured — a real KOL would click "Onboard with Stripe"
+  // and land on a local placeholder page, never reaching Stripe.
+  //
+  // Now: only return mock when NODE_ENV === 'development' AND the
+  // key is missing/placeholder. In production or staging with a
+  // missing key we fail loudly with 500 so ops notices.
+  const isDevMock =
+    process.env.NODE_ENV === "development" &&
+    (!env.STRIPE_SECRET_KEY ||
+      env.STRIPE_SECRET_KEY.startsWith("PLACEHOLDER") ||
+      env.STRIPE_SECRET_KEY === "sk_test_PLACEHOLDER");
+  if (isDevMock) {
     const mockAccountId = existingAccountId || `acct_devmock_${promoter.id.slice(0, 8)}`;
     await supabase
       .from("affiliate.promoters")
@@ -143,12 +152,12 @@ export async function getMyStripeStatus(req: Request, res: Response) {
   const accountId = data?.stripe_account_id ?? null;
   const onboardingCompleted = !!data?.stripe_onboarding_completed;
 
-  // Dev fallback for verifying real status — in test mode without
-  // live Stripe key, treat the mock account as connected for UI demo
+  // AS-P2-4 fix: dev-mock fallback gated on NODE_ENV (see postMyStripeConnect).
   const isDevMock =
-    !env.STRIPE_SECRET_KEY ||
-    env.STRIPE_SECRET_KEY.startsWith("PLACEHOLDER") ||
-    env.STRIPE_SECRET_KEY === "sk_test_PLACEHOLDER";
+    process.env.NODE_ENV === "development" &&
+    (!env.STRIPE_SECRET_KEY ||
+      env.STRIPE_SECRET_KEY.startsWith("PLACEHOLDER") ||
+      env.STRIPE_SECRET_KEY === "sk_test_PLACEHOLDER");
 
   res.json({
     data: {
