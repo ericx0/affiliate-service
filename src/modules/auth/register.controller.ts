@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { z } from "zod";
 import { supabase } from "../../config.js";
 import { internalError } from "../../utils/controller-error.js";
+import { logger } from "../../utils/logger.js";
 
 const SelfRegisterSchema = z.object({
   authUserId: z.string().uuid("Invalid authUserId"),
@@ -23,6 +24,9 @@ const SelfRegisterSchema = z.object({
  *  - Verifies the body's `email` matches the verified user's email
  *    to prevent an attacker from creating phantom promoter rows
  *    for arbitrary emails.
+ *  - Per-email rate limit (AS-P2-8): 5 attempts per email per hour
+ *    via the rate_limit_consume RPC. Single-IP NAT bypasses the
+ *    IP-based limit in index.ts; this second layer keys on email.
  *  - Returns 409 on duplicate email (SQLSTATE 23505 from the RPC).
  */
 export async function selfRegister(req: Request, res: Response) {
@@ -30,6 +34,32 @@ export async function selfRegister(req: Request, res: Response) {
   if (!user) {
     res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing auth context" } });
     return;
+  }
+
+  // AS-P2-8: per-email rate limit. 5 attempts per email per hour.
+  // Runs BEFORE Zod parsing so a malformed-body spam attack also
+  // counts against the limit.
+  const emailForLimit = (req.body as { email?: string } | undefined)?.email?.toLowerCase() ?? user.email;
+  if (emailForLimit) {
+    const { data: rlData, error: rlErr } = await supabase.rpc(
+      "rate_limit_consume" as never,
+      {
+        p_key: `kol-register:${emailForLimit}`,
+        p_limit: 5,
+        p_window_seconds: 3600,
+      } as never,
+    );
+    if (rlErr) {
+      logger.error({ err: rlErr }, "kol-register rate limit RPC failed");
+    } else if (Array.isArray(rlData) && rlData[0]?.allowed === false) {
+      res.status(429).json({
+        error: {
+          code: "RATE_LIMITED",
+          message: "Too many registration attempts for this email. Try again later.",
+        },
+      });
+      return;
+    }
   }
 
   const parsed = SelfRegisterSchema.safeParse(req.body);
