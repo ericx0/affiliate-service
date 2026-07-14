@@ -67,6 +67,73 @@ export async function handleStripeWebhook(req: Request, res: Response) {
       break;
     }
 
+    // AS-P2-5: Stripe sent a chargeback/dispute against a charge that
+    // originated from a KOL-referred order. Alert operations so a
+    // human can review the dispute and decide whether to claw back
+    // the KOL commission. Without this handler, disputes go unnoticed
+    // until the KOL's next payout reconciliation — by which point the
+    // commission may already have been paid out.
+    case "charge.dispute.created": {
+      const dispute = event.data.object as Stripe.Dispute;
+      const chargeId = typeof dispute.charge === "string"
+        ? dispute.charge
+        : dispute.charge?.id;
+      logger.error(
+        {
+          disputeId: dispute.id,
+          chargeId,
+          amount: dispute.amount,
+          reason: dispute.reason,
+        },
+        "Stripe charge.dispute.created — investigate and decide commission clawback",
+      );
+      // TODO: write to admin_alerts table + send Slack/email.
+      // Deferred; for now we log loudly so it appears in alerts.
+      break;
+    }
+
+    // AS-P2-5: KOL payout failed — money didn't reach their Stripe
+    // Connect account. Without this, KOLs silently lose payouts and
+    // only notice at month-end reconciliation. Log + alert so
+    // operations can manually re-trigger.
+    case "payout.failed": {
+      const payout = event.data.object as Stripe.Payout;
+      logger.error(
+        {
+          payoutId: payout.id,
+          amount: payout.amount,
+          currency: payout.currency,
+          failureCode: payout.failure_code,
+          failureMessage: payout.failure_message,
+          arrivalDate: payout.arrival_date,
+        },
+        "Stripe payout.failed — KOL did not receive funds",
+      );
+      // TODO: write to admin_alerts + Slack.
+      break;
+    }
+
+    // AS-P2-5: KOL disconnected their Stripe Connect account from
+    // our platform. Mark the promoter as suspended so payouts stop
+    // attempting to use the disconnected account.
+    case "account.application.deauthorized": {
+      const account = event.data.object as Stripe.Account;
+      await supabase
+        .from("promoters")
+        .update({
+          status: "suspended",
+          suspended_reason: "stripe_disconnected",
+          suspended_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("stripe_account_id", account.id);
+      logger.warn(
+        { accountId: account.id },
+        "KOL deauthorized Stripe Connect; promoter auto-suspended",
+      );
+      break;
+    }
+
     default:
       logger.debug({ type: event.type }, "unhandled Stripe webhook event");
   }
