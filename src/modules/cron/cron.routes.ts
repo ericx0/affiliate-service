@@ -1,4 +1,5 @@
 import { Router } from "express";
+import crypto from "node:crypto";
 import { logger } from "../../utils/logger.js";
 import { approveExpiredCooldowns } from "../commissions/commissions.service.js";
 import { payCommissions } from "../payouts/payouts.service.js";
@@ -15,7 +16,22 @@ cronRouter.use((req, res, next) => {
     return res.status(503).json({ error: "Cron not configured" });
   }
   const authHeader = req.headers.authorization;
-  if (authHeader !== `Bearer ${cronSecret}`) {
+  // AS-P2-11 fix: timingSafeEqual for the bearer comparison. String
+  // === is technically constant-time-ish in V8 (no early-exit on
+  // length-mismatch since we check length first) but using the
+  // canonical helper is defense-in-depth and consistent with the
+  // hmac middleware's signing-compare pattern.
+  const expected = `Bearer ${cronSecret}`;
+  const provided = authHeader ?? "";
+  if (provided.length !== expected.length) {
+    logger.warn("Unauthorized attempt to hit cron endpoint");
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  const ok = crypto.timingSafeEqual(
+    Buffer.from(provided),
+    Buffer.from(expected),
+  );
+  if (!ok) {
     logger.warn("Unauthorized attempt to hit cron endpoint");
     return res.status(401).json({ error: "Unauthorized" });
   }
