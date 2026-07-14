@@ -61,19 +61,26 @@ export async function postMyStripeConnect(req: Request, res: Response) {
 
     // 1. Create Connect Express account if KOL doesn't have one yet
     if (!accountId) {
-      const account = await stripe.accounts.create({
-        type: "express",
-        country: promoter.country_code || "US",
-        email: promoter.email,
-        capabilities: {
-          transfers: { requested: true },
+      // AS-P2-3: idempotencyKey prevents double-creation when a
+      // user double-clicks or two browser tabs race. The key is
+      // derived from the immutable promoter.id so retries within the
+      // 24h Stripe idempotency window collapse to one account.
+      const account = await stripe.accounts.create(
+        {
+          type: "express",
+          country: promoter.country_code || "US",
+          email: promoter.email,
+          capabilities: {
+            transfers: { requested: true },
+          },
+          business_type: "individual",
+          metadata: {
+            promoter_id: promoter.id,
+            promoter_name: promoter.name || "",
+          },
         },
-        business_type: "individual",
-        metadata: {
-          promoter_id: promoter.id,
-          promoter_name: promoter.name || "",
-        },
-      });
+        { idempotencyKey: `promoter-connect-${promoter.id}` },
+      );
       accountId = account.id;
 
       // Persist immediately so subsequent requests see the new id
