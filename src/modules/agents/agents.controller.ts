@@ -34,15 +34,27 @@ function parsePaging(req: Request): { limit: number; offset: number } {
  * NEVER client-supplied - prevents binding a KOL to another agent.
  */
 export async function createKol(req: Request, res: Response) {
-  const agentId = req.agent?.id;
-  if (!agentId) {
+  const agent = req.agent;
+  if (!agent) {
     res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing agent context" } });
     return;
   }
   const input = CreateKolSchema.parse(req.body);
 
+  // Security: KOL commission rate is capped at 10% (fixed, unrelated to the
+  // agent's own admin-set rate). The agent's own rate (5/8/10% by level) only
+  // affects the agent's override commission, not the KOL cap.
+  const MAX_KOL_RATE = 10;
+  const kolRate = input.commission_rate ?? MAX_KOL_RATE;
+  if (kolRate > MAX_KOL_RATE) {
+    res.status(400).json({
+      error: { code: "RATE_EXCEEDS_MAX", message: `KOL commission rate cannot exceed ${MAX_KOL_RATE}%` },
+    });
+    return;
+  }
+
   const { data, error } = await supabase.rpc("affiliate_agent_create_kol", {
-    p_agent_promoter_id: agentId,
+    p_agent_promoter_id: agent.id,
     p_name: input.name,
     p_email: input.email,
     p_country_code: input.country_code || null,
@@ -51,14 +63,14 @@ export async function createKol(req: Request, res: Response) {
     p_brand_name: input.brand_name || null,
     p_phone: input.phone || null,
     p_bio: input.bio || null,
-    p_commission_rate: input.commission_rate ?? 10.0,
+    p_commission_rate: kolRate,
   });
   if (error) {
     logger.error({ err: error }, "agent createKol failed");
     internalError(res, "CREATE_FAILED", error);
     return;
   }
-  logger.info({ kolId: data?.id, agentId }, "agent created KOL");
+  logger.info({ kolId: data?.id, agentId: agent.id }, "agent created KOL");
   res.status(201).json(data);
 }
 
@@ -179,6 +191,7 @@ export async function getMyStats(req: Request, res: Response) {
     totalPaid: sum("paid"),
     totalPending: sum("cooling_down") + sum("pending"),
     totalApproved: sum("approved"),
+    agentRate: req.agent?.commission_rate ?? 0,
   });
 }
 
@@ -295,12 +308,22 @@ const UpdateKolSchema = z.object({
 /** PATCH /api/affiliate/agent/kols/:id - agent updates a recruited KOL's
  * editable fields (commission rate, platform, brand, bio). Ownership-restricted. */
 export async function updateKol(req: Request, res: Response) {
-  const agentId = req.agent?.id;
-  if (!agentId) {
+  const agent = req.agent;
+  if (!agent) {
     res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing agent context" } });
     return;
   }
   const input = UpdateKolSchema.parse(req.body);
+
+  // Security: KOL commission rate capped at 10% (fixed, unrelated to agent's own rate).
+  const MAX_KOL_RATE = 10;
+  if (input.commission_rate !== undefined && input.commission_rate > MAX_KOL_RATE) {
+    res.status(400).json({
+      error: { code: "RATE_EXCEEDS_MAX", message: `KOL commission rate cannot exceed ${MAX_KOL_RATE}%` },
+    });
+    return;
+  }
+
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
   for (const [k, v] of Object.entries(input)) {
     if (v !== undefined) updates[k] = v;
@@ -310,7 +333,7 @@ export async function updateKol(req: Request, res: Response) {
     .update(updates)
     .eq("id", req.params.id)
     .eq("role", "kol")
-    .eq("recruited_by_agent_id", agentId)
+    .eq("recruited_by_agent_id", agent.id)
     .select("id, commission_rate, primary_platform, brand_name, status")
     .maybeSingle();
   if (error) {
