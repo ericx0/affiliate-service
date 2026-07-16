@@ -13,6 +13,9 @@ const CreatePromoterSchema = z.object({
   brand_name: z.string().optional(),
   phone: z.string().optional(),
   bio: z.string().optional(),
+  role: z.enum(["kol", "agent"]).default("kol"),
+  auth_user_id: z.string().uuid().optional(),
+  commission_rate: z.number().min(0).max(50).optional(),
 });
 
 export async function createPromoter(req: Request, res: Response) {
@@ -27,6 +30,10 @@ export async function createPromoter(req: Request, res: Response) {
     p_brand_name: input.brand_name || null,
     p_phone: input.phone || null,
     p_bio: input.bio || null,
+    p_role: input.role,
+    p_auth_user_id: input.auth_user_id || null,
+    // Agents default to 10% override; KOLs keep the original 5% default.
+    p_commission_rate: input.commission_rate ?? (input.role === "agent" ? 10.0 : 5.0),
   });
 
   if (error) {
@@ -34,6 +41,6 @@ export async function createPromoter(req: Request, res: Response) {
     return internalError(res, "CREATE_FAILED", error);
   }
 
-  logger.info({ promoterId: data?.id, code: data?.code }, "promoter created");
+  logger.info({ promoterId: data?.id, code: data?.code, role: input.role }, "promoter created");
   res.status(201).json(data);
 }
