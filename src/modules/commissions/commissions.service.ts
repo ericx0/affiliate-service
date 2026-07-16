@@ -4,6 +4,7 @@ import { logger } from "../../utils/logger.js";
 import {
   Commission,
   CommissionStatus,
+  CommissionType,
   CreateCommissionInput,
   TransitionResult,
   VALID_TRANSITIONS,
@@ -19,6 +20,18 @@ export const AttachOrderSchema = z.object({
   commissionRate: z.number().min(0).max(50),
   currency: z.string().default("USD"),
 });
+
+/**
+ * Map a KOL commission type to the corresponding agent override type.
+ * Returns null for agent_* types - two-tier only, no override-of-override.
+ */
+export function agentCommissionType(kolType: CommissionType): CommissionType | null {
+  switch (kolType) {
+    case "service": return "agent_service";
+    case "subscription": return "agent_subscription";
+    default: return null;
+  }
+}
 
 /**
  * Attach an order to a promoter. Creates a commission record in 'pending' state.

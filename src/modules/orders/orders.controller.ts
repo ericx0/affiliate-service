@@ -2,7 +2,8 @@ import { Request, Response } from "express";
 import { z } from "zod";
 import { logger } from "../../utils/logger.js";
 import { supabase } from "../../config.js";
-import { attachToOrder, transition } from "../commissions/commissions.service.js";
+import { attachToOrder, transition, agentCommissionType } from "../commissions/commissions.service.js";
+import { Commission } from "../commissions/commissions.types.js";
 import { internalError } from "../../utils/controller-error.js";
 
 const AttachSchema = z.object({
@@ -16,10 +17,10 @@ const AttachSchema = z.object({
 export async function attach(req: Request, res: Response) {
   const input = AttachSchema.parse(req.body);
 
-  // Look up promoter commission_rate
+  // Look up promoter (KOL) commission_rate + recruited_by_agent_id
   const { data: promoter } = await supabase
-    .from("promoters")
-    .select("commission_rate, status")
+    .from("affiliate.promoters")
+    .select("commission_rate, status, recruited_by_agent_id")
     .eq("id", input.promoterId)
     .single();
 
@@ -27,6 +28,7 @@ export async function attach(req: Request, res: Response) {
     return res.status(400).json({ error: { code: "INVALID_PROMOTER", message: "Promoter not active" } });
   }
 
+  // 1. Attach the primary (KOL) commission.
   const result = await attachToOrder({
     promoterId: input.promoterId,
     orderId: input.orderId,
@@ -37,10 +39,50 @@ export async function attach(req: Request, res: Response) {
   });
 
   if (!result.success) {
-    return internalError(res, "ATTACH_FAILED", result)
+    return internalError(res, "ATTACH_FAILED", result);
   }
 
-  res.json({ success: true, commission: result.commission });
+  // 2. Two-tier split: if this KOL was recruited by an agent, attach an
+  //    override commission for the agent. Uses a distinct commission_type
+  //    ('agent_service' / 'agent_subscription') so UNIQUE(order_id,
+  //    commission_type) allows both rows. Failure here MUST NOT block the
+  //    KOL commission - log and surface a partial result.
+  let agentCommission: Commission | null = null;
+  const agentId = promoter.recruited_by_agent_id;
+  if (agentId) {
+    const { data: agent } = await supabase
+      .from("affiliate.promoters")
+      .select("commission_rate, status")
+      .eq("id", agentId)
+      .eq("role", "agent")
+      .maybeSingle();
+
+    if (agent && agent.status === "active") {
+      const agentType = agentCommissionType(input.commissionType);
+      if (agentType) {
+        const agentResult = await attachToOrder({
+          promoterId: agentId,
+          orderId: input.orderId,
+          commissionType: agentType,
+          orderAmount: input.orderAmount,
+          commissionRate: agent.commission_rate,
+          currency: input.currency,
+        });
+        if (agentResult.success) {
+          agentCommission = agentResult.commission ?? null;
+        } else {
+          logger.error(
+            { orderId: input.orderId, agentId, error: agentResult.error },
+            "agent override commission attach failed; KOL commission still attached",
+          );
+        }
+      }
+    } else {
+      logger.warn({ orderId: input.orderId, agentId }, "agent not active or not found; override skipped");
+    }
+  }
+
+  res.json({ success: true, commission: result.commission, agentCommission });
 }
 
 const OrderEventSchema = z.object({

@@ -6,7 +6,7 @@ export type CommissionStatus =
   | "refunded"
   | "reversed";
 
-export type CommissionType = "service" | "subscription";
+export type CommissionType = "service" | "subscription" | "agent_service" | "agent_subscription";
 
 export interface Commission {
   id: string;

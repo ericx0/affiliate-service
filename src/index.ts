@@ -13,6 +13,7 @@ import { promotersRouter } from "./modules/promoters/promoters.routes.js";
 import { adminAuthRouter } from "./modules/auth/auth.routes.js";
 import { meRouter } from "./modules/me/me.routes.js";
 import { registerRouter } from "./modules/auth/register.routes.js";
+import { agentRouter } from "./modules/agents/agents.routes.js";
 import { handleStripeWebhook } from "./modules/payouts/stripe-webhook.controller.js";
 import { startCooldownApprovalJob } from "./jobs/approve-expired-cooldown.js";
 import { startMonthlyPayoutJob } from "./jobs/monthly-payout-batch.js";
@@ -83,6 +84,7 @@ app.use("/api/affiliate/admin", authLimiter, adminRouter);   // adminAuthMiddlew
 app.use("/api/affiliate/promoters", authLimiter, promotersRouter);  // adminAuthMiddleware inside promotersRouter
 app.use("/api/affiliate/auth/admin", authLimiter, adminAuthRouter);
 app.use("/api/affiliate/me", authLimiter, meRouter);
+app.use("/api/affiliate/agent", authLimiter, agentRouter);
 app.use("/api/affiliate/auth/register", authLimiter, registerRouter);
 app.use("/api/affiliate/cron", cronRouter);
 

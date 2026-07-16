@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { canTransition } from "./commissions.types.js";
+import { agentCommissionType } from "./commissions.service.js";
 
 describe("commission state machine", () => {
   it("cooling_down → approved is valid", () => {
@@ -32,5 +33,20 @@ describe("commission state machine", () => {
 
   it("approved → cooling_down is INVALID", () => {
     expect(canTransition("approved", "cooling_down")).toBe(false);
+  });
+});
+
+describe("agentCommissionType", () => {
+  it("maps 'service' to 'agent_service'", () => {
+    expect(agentCommissionType("service")).toBe("agent_service");
+  });
+
+  it("maps 'subscription' to 'agent_subscription'", () => {
+    expect(agentCommissionType("subscription")).toBe("agent_subscription");
+  });
+
+  it("returns null for agent_* (no override-of-override, two-tier only)", () => {
+    expect(agentCommissionType("agent_service")).toBeNull();
+    expect(agentCommissionType("agent_subscription")).toBeNull();
   });
 });
