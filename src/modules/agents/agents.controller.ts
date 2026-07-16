@@ -181,3 +181,145 @@ export async function getMyStats(req: Request, res: Response) {
     totalApproved: sum("approved"),
   });
 }
+
+/** GET /api/affiliate/agent/kols/:id/commissions - a recruited KOL's
+ * commission history (service/subscription). Ownership: KOL must be
+ * recruited by this agent. */
+export async function getKolCommissions(req: Request, res: Response) {
+  const agentId = req.agent?.id;
+  if (!agentId) {
+    res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing agent context" } });
+    return;
+  }
+  const { data: kol } = await supabase
+    .from("affiliate.promoters")
+    .select("id")
+    .eq("id", req.params.id)
+    .eq("role", "kol")
+    .eq("recruited_by_agent_id", agentId)
+    .maybeSingle();
+  if (!kol) {
+    res.status(404).json({ error: { code: "NOT_FOUND", message: "KOL not found or not recruited by you" } });
+    return;
+  }
+  const { limit, offset } = parsePaging(req);
+  const { data, error, count } = await supabase
+    .from("affiliate.commissions")
+    .select(
+      "id, order_id, commission_type, order_amount, commission_rate, commission_amount, currency, status, created_at, paid_at",
+      { count: "exact" },
+    )
+    .eq("promoter_id", req.params.id)
+    .in("commission_type", ["service", "subscription"])
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+  if (error) {
+    internalError(res, "QUERY_FAILED", error);
+    return;
+  }
+  res.json({ data: data ?? [], total: count ?? 0 });
+}
+
+/** POST /api/affiliate/agent/kols/:id/suspend - agent suspends a KOL they
+ * recruited (ownership-restricted UPDATE). */
+export async function suspendKol(req: Request, res: Response) {
+  const agentId = req.agent?.id;
+  if (!agentId) {
+    res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing agent context" } });
+    return;
+  }
+  const reason = (req.body?.reason as string) || "Suspended by agent";
+  const { data, error } = await supabase
+    .from("affiliate.promoters")
+    .update({
+      status: "suspended",
+      suspended_reason: reason,
+      suspended_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", req.params.id)
+    .eq("role", "kol")
+    .eq("recruited_by_agent_id", agentId)
+    .select("id, status")
+    .maybeSingle();
+  if (error) {
+    internalError(res, "UPDATE_FAILED", error);
+    return;
+  }
+  if (!data) {
+    res.status(404).json({ error: { code: "NOT_FOUND", message: "KOL not found or not recruited by you" } });
+    return;
+  }
+  res.json({ success: true, promoter: data });
+}
+
+/** POST /api/affiliate/agent/kols/:id/activate - agent reactivates a KOL. */
+export async function activateKol(req: Request, res: Response) {
+  const agentId = req.agent?.id;
+  if (!agentId) {
+    res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing agent context" } });
+    return;
+  }
+  const { data, error } = await supabase
+    .from("affiliate.promoters")
+    .update({
+      status: "active",
+      suspended_reason: null,
+      suspended_at: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", req.params.id)
+    .eq("role", "kol")
+    .eq("recruited_by_agent_id", agentId)
+    .select("id, status")
+    .maybeSingle();
+  if (error) {
+    internalError(res, "UPDATE_FAILED", error);
+    return;
+  }
+  if (!data) {
+    res.status(404).json({ error: { code: "NOT_FOUND", message: "KOL not found or not recruited by you" } });
+    return;
+  }
+  res.json({ success: true, promoter: data });
+}
+
+const UpdateKolSchema = z.object({
+  commission_rate: z.number().min(0).max(50).optional(),
+  primary_platform: z.string().optional(),
+  primary_platform_url: z.string().url().optional(),
+  brand_name: z.string().optional(),
+  bio: z.string().optional(),
+});
+
+/** PATCH /api/affiliate/agent/kols/:id - agent updates a recruited KOL's
+ * editable fields (commission rate, platform, brand, bio). Ownership-restricted. */
+export async function updateKol(req: Request, res: Response) {
+  const agentId = req.agent?.id;
+  if (!agentId) {
+    res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing agent context" } });
+    return;
+  }
+  const input = UpdateKolSchema.parse(req.body);
+  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  for (const [k, v] of Object.entries(input)) {
+    if (v !== undefined) updates[k] = v;
+  }
+  const { data, error } = await supabase
+    .from("affiliate.promoters")
+    .update(updates)
+    .eq("id", req.params.id)
+    .eq("role", "kol")
+    .eq("recruited_by_agent_id", agentId)
+    .select("id, commission_rate, primary_platform, brand_name, status")
+    .maybeSingle();
+  if (error) {
+    internalError(res, "UPDATE_FAILED", error);
+    return;
+  }
+  if (!data) {
+    res.status(404).json({ error: { code: "NOT_FOUND", message: "KOL not found or not recruited by you" } });
+    return;
+  }
+  res.json({ success: true, promoter: data });
+}

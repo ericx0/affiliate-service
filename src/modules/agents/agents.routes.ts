@@ -4,6 +4,10 @@ import {
   createKol,
   listKols,
   getKol,
+  getKolCommissions,
+  suspendKol,
+  activateKol,
+  updateKol,
   getMyCommissions,
   getMyStats,
 } from "./agents.controller.js";
@@ -17,5 +21,9 @@ agentRouter.use(agentAuthMiddleware);
 agentRouter.post("/kols", createKol);
 agentRouter.get("/kols", listKols);
 agentRouter.get("/kols/:id", getKol);
+agentRouter.get("/kols/:id/commissions", getKolCommissions);
+agentRouter.post("/kols/:id/suspend", suspendKol);
+agentRouter.post("/kols/:id/activate", activateKol);
+agentRouter.patch("/kols/:id", updateKol);
 agentRouter.get("/commissions", getMyCommissions);
 agentRouter.get("/stats", getMyStats);
