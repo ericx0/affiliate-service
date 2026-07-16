@@ -33,6 +33,6 @@ export const supabase: SupabaseClient = createClient(env.SUPABASE_URL, env.SUPAB
 
 import Stripe from "stripe";
 export const stripe = new Stripe(env.STRIPE_SECRET_KEY, {
-  apiVersion: "2023-10-16",
+  apiVersion: "2024-06-20",
   httpClient: Stripe.createFetchHttpClient(),
 });

@@ -117,7 +117,7 @@ export async function handleStripeWebhook(req: Request, res: Response) {
     // our platform. Mark the promoter as suspended so payouts stop
     // attempting to use the disconnected account.
     case "account.application.deauthorized": {
-      const account = event.data.object as Stripe.Account;
+      const account = event.data.object as Stripe.Application;
       await supabase
         .from("promoters")
         .update({
