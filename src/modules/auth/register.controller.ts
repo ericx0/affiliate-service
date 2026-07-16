@@ -11,6 +11,7 @@ const SelfRegisterSchema = z.object({
   countryCode: z.string().min(2).max(8),
   primaryPlatform: z.string().min(1).max(50),
   primaryPlatformUrl: z.string().url().max(500),
+  referralCode: z.string().min(1).max(50),
 });
 
 /**
@@ -86,6 +87,23 @@ export async function selfRegister(req: Request, res: Response) {
     return;
   }
 
+  // Look up the recruiting agent by referral code (must be an active agent).
+  const { data: codeRow, error: codeErr } = await supabase
+    .from("affiliate.referral_codes")
+    .select("promoter_id, promoters!inner(id, role, status)")
+    .eq("code", body.referralCode.toUpperCase())
+    .eq("is_active", true)
+    .maybeSingle();
+  if (codeErr || !codeRow) {
+    res.status(400).json({ error: { code: "INVALID_REFERRAL_CODE", message: "Invalid or inactive referral code" } });
+    return;
+  }
+  const agent = codeRow.promoters as { id: string; role: string; status: string } | null;
+  if (!agent || agent.role !== "agent" || agent.status !== "active") {
+    res.status(400).json({ error: { code: "INVALID_REFERRAL_CODE", message: "Referral code does not belong to an active agent" } });
+    return;
+  }
+
   const { data, error } = await supabase.rpc("affiliate_self_register_promoter", {
     p_auth_user_id: body.authUserId,
     p_name: body.name,
@@ -93,6 +111,7 @@ export async function selfRegister(req: Request, res: Response) {
     p_country: body.countryCode,
     p_platform: body.primaryPlatform,
     p_platform_url: body.primaryPlatformUrl,
+    p_recruited_by_agent_id: agent.id,
   });
 
   if (error) {
