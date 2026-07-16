@@ -45,11 +45,17 @@ export async function createPromoter(req: Request, res: Response) {
   res.status(201).json(data);
 }
 
+const AGENT_RATE_BY_LEVEL: Record<string, number> = {
+  basic: 5.0,
+  senior: 8.0,
+  regional: 10.0,
+};
+
 const CreateAgentSchema = z.object({
   name: z.string().min(1),
   email: z.string().email(),
   password: z.string().min(8).max(128),
-  commission_rate: z.number().min(0).max(50).default(10),
+  agent_level: z.enum(["basic", "senior", "regional"]),
   phone: z.string().optional(),
   brand_name: z.string().optional(),
 });
@@ -57,11 +63,13 @@ const CreateAgentSchema = z.object({
 /**
  * Admin creates an agent. Creates the Supabase auth user (service_role -
  * chinamed-admin's anon client cannot) then the promoter row with
- * role='agent' + auth_user_id, so the agent can log in via agent-auth.
- * On promoter-create failure the auth user is rolled back (no orphan login).
+ * role='agent' + auth_user_id + agent_level. Commission rate is derived
+ * from agent_level (basic 5% / senior 8% / regional 10%). On promoter-create
+ * failure the auth user is rolled back (no orphan login).
  */
 export async function createAgent(req: Request, res: Response) {
   const input = CreateAgentSchema.parse(req.body);
+  const commissionRate = AGENT_RATE_BY_LEVEL[input.agent_level];
 
   const { data: authUser, error: authErr } = await supabase.auth.admin.createUser({
     email: input.email,
@@ -81,7 +89,8 @@ export async function createAgent(req: Request, res: Response) {
     p_brand_name: input.brand_name || null,
     p_role: "agent",
     p_auth_user_id: authUserId,
-    p_commission_rate: input.commission_rate,
+    p_commission_rate: commissionRate,
+    p_agent_level: input.agent_level,
   });
   if (error) {
     await supabase.auth.admin.deleteUser(authUserId);
@@ -89,6 +98,6 @@ export async function createAgent(req: Request, res: Response) {
     return internalError(res, "CREATE_FAILED", error);
   }
 
-  logger.info({ agentId: data?.id, authUserId }, "admin created agent");
-  res.status(201).json({ ...(data ?? {}), auth_user_id: authUserId });
+  logger.info({ agentId: data?.id, authUserId, agentLevel: input.agent_level }, "admin created agent");
+  res.status(201).json({ ...(data ?? {}), auth_user_id: authUserId, agent_level: input.agent_level, commission_rate: commissionRate });
 }

@@ -27,7 +27,7 @@ export async function postMyStripeConnect(req: Request, res: Response) {
   // Read latest stripe_account_id (auth middleware doesn't include it)
   const { data: p } = await supabase
     .from("affiliate.promoters")
-    .select("stripe_account_id")
+    .select("stripe_account_id, role, agent_level")
     .eq("id", promoter.id)
     .single();
   const existingAccountId = p?.stripe_account_id ?? null;
@@ -86,6 +86,8 @@ export async function postMyStripeConnect(req: Request, res: Response) {
           metadata: {
             promoter_id: promoter.id,
             promoter_name: promoter.name || "",
+            role: p?.role || "kol",
+            agent_level: p?.agent_level || null,
           },
         },
         { idempotencyKey: `promoter-connect-${promoter.id}` },
