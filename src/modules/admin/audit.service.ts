@@ -58,7 +58,7 @@ export async function writeAuditLog(input: AuditLogInput): Promise<boolean> {
         : ` [non-uuid-target-id:${input.targetId}]`),
   };
 
-  const { error } = await supabase.from("audit_logs").insert(row);
+  const { error } = await supabase.from("affiliate.audit_logs").insert(row);
 
   if (error) {
     logger.error(

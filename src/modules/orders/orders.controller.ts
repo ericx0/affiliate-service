@@ -111,7 +111,7 @@ export async function onOrderRefunded(req: Request, res: Response) {
 
   // 1. Idempotency: atomically claim the eventId. Conflict = already
   //    processed this event — return success without re-applying.
-  const { error: claimErr } = await supabase.from("refund_events").insert({
+  const { error: claimErr } = await supabase.from("affiliate.refund_events").insert({
     event_id: eventId,
     order_id: orderId,
     refund_amount: refundAmount ?? null,
