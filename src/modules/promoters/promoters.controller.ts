@@ -44,3 +44,51 @@ export async function createPromoter(req: Request, res: Response) {
   logger.info({ promoterId: data?.id, code: data?.code, role: input.role }, "promoter created");
   res.status(201).json(data);
 }
+
+const CreateAgentSchema = z.object({
+  name: z.string().min(1),
+  email: z.string().email(),
+  password: z.string().min(8).max(128),
+  commission_rate: z.number().min(0).max(50).default(10),
+  phone: z.string().optional(),
+  brand_name: z.string().optional(),
+});
+
+/**
+ * Admin creates an agent. Creates the Supabase auth user (service_role -
+ * chinamed-admin's anon client cannot) then the promoter row with
+ * role='agent' + auth_user_id, so the agent can log in via agent-auth.
+ * On promoter-create failure the auth user is rolled back (no orphan login).
+ */
+export async function createAgent(req: Request, res: Response) {
+  const input = CreateAgentSchema.parse(req.body);
+
+  const { data: authUser, error: authErr } = await supabase.auth.admin.createUser({
+    email: input.email,
+    password: input.password,
+    email_confirm: true,
+  });
+  if (authErr || !authUser.user) {
+    logger.error({ err: authErr }, "createAgent: auth user creation failed");
+    return internalError(res, "AUTH_USER_CREATE_FAILED", authErr ?? { message: "Failed to create auth user" });
+  }
+  const authUserId = authUser.user.id;
+
+  const { data, error } = await supabase.rpc("affiliate_create_promoter", {
+    p_name: input.name,
+    p_email: input.email,
+    p_phone: input.phone || null,
+    p_brand_name: input.brand_name || null,
+    p_role: "agent",
+    p_auth_user_id: authUserId,
+    p_commission_rate: input.commission_rate,
+  });
+  if (error) {
+    await supabase.auth.admin.deleteUser(authUserId);
+    logger.error({ err: error, authUserId }, "createAgent: promoter creation failed; auth user rolled back");
+    return internalError(res, "CREATE_FAILED", error);
+  }
+
+  logger.info({ agentId: data?.id, authUserId }, "admin created agent");
+  res.status(201).json({ ...(data ?? {}), auth_user_id: authUserId });
+}

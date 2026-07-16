@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { adminAuthMiddleware } from "../../middleware/admin-auth.js";
-import { createPromoter } from "./promoters.controller.js";
+import { createPromoter, createAgent } from "./promoters.controller.js";
 
 export const promotersRouter = Router();
 
@@ -8,3 +8,4 @@ export const promotersRouter = Router();
 promotersRouter.use(adminAuthMiddleware);
 
 promotersRouter.post("/", createPromoter);
+promotersRouter.post("/agent", createAgent);
