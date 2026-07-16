@@ -24,7 +24,7 @@ const app = express();
 // CORS — allow the KOL portal to call this service cross-origin.
 // Without this, every browser fetch fails at the preflight stage.
 app.use(cors({
-  origin: ["https://affiliate.linkchinamed.com"],
+  origin: ["https://affiliate.linkchinamed.com", "https://adminss.linkchinamed.com"],
   methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "X-TOTP-Code"],
   credentials: false,
