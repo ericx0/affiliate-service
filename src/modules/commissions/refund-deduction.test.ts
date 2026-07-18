@@ -35,6 +35,18 @@ describe("calculateRefundDeduction", () => {
     });
     expect(second.newCommissionAmount).toBeCloseTo(30, 0);  // 50 * 0.8 * 0.75 = 30
   });
+
+  it("rounds to 2 decimals for dollar amounts with cents", () => {
+    // commission 49.99, order 200.00, refund 50.00 (25%)
+    // deduct = 49.99 * 50 / 200 = 12.4975 -> 12.50 (2-decimal round)
+    const result = calculateRefundDeduction({
+      orderAmount: 200,
+      commissionAmount: 49.99,
+      refundAmount: 50,
+    });
+    expect(result.deductAmount).toBe(12.50);
+    expect(result.newCommissionAmount).toBe(37.49);
+  });
 });
 
 describe("shouldAutoReverse", () => {

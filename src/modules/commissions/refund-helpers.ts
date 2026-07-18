@@ -1,5 +1,5 @@
 export interface RefundDeductionInput {
-  // All amounts are in cents (integer).
+  // All amounts are in dollars (NUMERIC(12,2), 2-decimal rounding).
   orderAmount: number;
   commissionAmount: number;
   refundAmount: number;
@@ -12,13 +12,15 @@ export interface RefundDeductionResult {
 }
 
 export function calculateRefundDeduction(input: RefundDeductionInput): RefundDeductionResult {
-  // Integer-cents math. refundPercentage is the only non-integer output
-  // (it's a percentage, not a money amount).
+  // Dollar math with 2-decimal rounding (matches commissions table NUMERIC(12,2)).
+  // refundPercentage is the only non-rounded output (it's a percentage).
   const refundPercentage = (input.refundAmount / input.orderAmount) * 100;
   const deductAmount = Math.round(
-    (input.commissionAmount * input.refundAmount) / input.orderAmount,
-  );
-  const newCommissionAmount = input.commissionAmount - deductAmount;
+    ((input.commissionAmount * input.refundAmount) / input.orderAmount) * 100,
+  ) / 100;
+  const newCommissionAmount = Math.round(
+    (input.commissionAmount - deductAmount) * 100,
+  ) / 100;
   return {
     deductAmount,
     newCommissionAmount,
