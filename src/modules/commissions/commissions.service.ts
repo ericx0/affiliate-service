@@ -199,10 +199,18 @@ export async function approveExpiredCooldowns(): Promise<number> {
 /**
  * Reverse a paid commission via Stripe Transfer reversal.
  * Used when a refund occurs after payout.
+ *
+ * Partial-reversal aware: caller passes `amount` (in the same unit as
+ * `commission_amount`) and an `eventId` scoped idempotency key so multiple
+ * partial reversals (different events) don't collide. Does NOT auto-transition
+ * to "reversed" -- the caller (Task 4 onOrderRefunded) decides terminal state
+ * based on cumulative refunded amount.
  */
 export async function reversePaidCommission(
   commissionId: string,
-  reason: string
+  amount: number,
+  reason: string,
+  eventId: string,
 ): Promise<TransitionResult> {
   const { data: commission, error } = await supabase
     .from("commissions")
@@ -219,22 +227,21 @@ export async function reversePaidCommission(
   }
 
   try {
-    // Reverse the Stripe transfer. Idempotency key prevents double-reversal
-    // (e.g. retry of this endpoint after a transient failure between the
-    // Stripe call and the DB transition) from withdrawing twice.
+    // Partial reversal: amount passed by caller (deductAmount for partial,
+    // remaining commission_amount for full). Idempotency key scoped by eventId
+    // so multiple partial reversals (different events) don't collide.
     await stripe.transfers.createReversal(
       commission.stripe_transfer_id,
       {
-        amount: commission.commission_amount,  // already cents
-        metadata: { commissionId, reason },
+        amount,
+        metadata: { commissionId, reason, eventId },
       },
-      { idempotencyKey: `commission-reverse-${commissionId}` },
+      { idempotencyKey: `commission-reverse-${commissionId}-${eventId}` },
     );
-
-    // Mark as reversed
-    return await transition(commissionId, "reversed", { refund_reason: reason });
+    // 不自动 transition -- 调用方按累计退款决定状态(reversed 仅在累计退满时)
+    return { success: true, commission: commission as Commission };
   } catch (err) {
-    logger.error({ err, commissionId }, "failed to reverse Stripe transfer");
+    logger.error({ err, commissionId, eventId }, "failed to reverse Stripe transfer");
     return { success: false, error: (err as Error).message };
   }
 }
