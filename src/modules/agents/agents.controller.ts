@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { z } from "zod";
-import { supabase } from "../../config.js";
+import { supabase, env } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { internalError } from "../../utils/controller-error.js";
 
@@ -149,6 +149,49 @@ export async function getMyCommissions(req: Request, res: Response) {
     return;
   }
   res.json({ data: data ?? [], total: count ?? 0 });
+}
+
+/**
+ * GET /api/affiliate/agent/invite-code - the agent's own invite code + link.
+ *
+ * Returns the agent's agent_invite_code (auto-populated by the
+ * affiliate.auto_set_agent_invite_code trigger) and the KOL registration
+ * link with ?agent=<code> query param.
+ *
+ * Auth: agentAuthMiddleware already enforces role='agent' AND status='active',
+ * so KOL JWTs are rejected at the middleware layer (403 NOT_AN_AGENT) - they
+ * never reach this handler. Per TRD B6: "KOL 调用返 403 (仅 agent)".
+ */
+export async function getMyInviteCode(req: Request, res: Response) {
+  const agent = req.agent;
+  if (!agent) {
+    res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing agent context" } });
+    return;
+  }
+
+  const { data, error } = await supabase
+    .from("affiliate.promoters")
+    .select("agent_invite_code")
+    .eq("id", agent.id)
+    .eq("role", "agent")
+    .maybeSingle();
+  if (error) return internalError(res, "QUERY_FAILED", error);
+  if (!data?.agent_invite_code) {
+    // Should not happen: the trigger populates this on INSERT/UPDATE for
+    // role='agent'. If we hit this, the trigger is missing or was disabled.
+    return internalError(
+      res,
+      "INVITE_CODE_MISSING",
+      new Error(`Agent ${agent.id} has no agent_invite_code (trigger missing?)`),
+    );
+  }
+
+  const code = data.agent_invite_code;
+  const baseUrl = env.PORTAL_URL || env.WEB_URL || "https://affiliate.linkchinamed.com";
+  res.json({
+    agent_invite_code: code,
+    invite_link: `${baseUrl}/register?agent=${code}`,
+  });
 }
 
 /** GET /api/affiliate/agent/stats - dashboard overview. */

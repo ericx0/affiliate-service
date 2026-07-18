@@ -11,7 +11,14 @@ const SelfRegisterSchema = z.object({
   countryCode: z.string().min(2).max(8),
   primaryPlatform: z.string().min(1).max(50),
   primaryPlatformUrl: z.string().url().max(500),
-  referralCode: z.string().min(1).max(50),
+  // Optional: agent's referral code (existing agent-binding mechanism, looked
+  // up via affiliate.referral_codes). Was required pre-TRD-2026-003; now
+  // optional because agent_invite_code is an alternative binding path.
+  referralCode: z.string().min(1).max(50).optional(),
+  // Optional: agent's invite code (NEW per TRD-2026-003 B3#4). Looked up via
+  // affiliate.promoters.agent_invite_code. Accept from body OR ?agent= query
+  // (the latter lets /register?agent=CODE work without client-side parsing).
+  agent_invite_code: z.string().min(1).max(50).optional(),
 });
 
 /**
@@ -87,21 +94,69 @@ export async function selfRegister(req: Request, res: Response) {
     return;
   }
 
-  // Look up the recruiting agent by referral code (must be an active agent).
-  const { data: codeRow, error: codeErr } = await supabase
-    .from("affiliate.referral_codes")
-    .select("promoter_id, promoters!inner(id, role, status)")
-    .eq("code", body.referralCode.toUpperCase())
-    .eq("is_active", true)
-    .maybeSingle();
-  if (codeErr || !codeRow) {
-    res.status(400).json({ error: { code: "INVALID_REFERRAL_CODE", message: "Invalid or inactive referral code" } });
-    return;
+  // Resolve the recruiting agent. Two mechanisms (TRD-2026-003 B3#4):
+  //
+  //   1. agent_invite_code (preferred) - looked up via
+  //      affiliate.promoters.agent_invite_code where role='agent' AND
+  //      status='active'. If provided but not found, IGNORE (no error) -
+  //      a stale invite link should still let the KOL register.
+  //
+  //   2. referralCode (fallback) - existing mechanism, looked up via
+  //      affiliate.referral_codes. If provided AND invalid -> 400 (the
+  //      user typed a code that doesn't match; surface the error so they
+  //      can correct it).
+  //
+  // If neither resolves an agent, register WITHOUT binding
+  // (p_recruited_by_agent_id=NULL). The RPC handles null gracefully.
+  let recruitedByAgentId: string | null = null;
+
+  // ?agent= query param wins over body.agent_invite_code (TRD writes it as
+  // "?agent="; we also accept body.agent_invite_code for clients that prefer
+  // to send everything in the body).
+  const queryAgent = typeof req.query.agent === "string" ? req.query.agent : null;
+  const agentInviteCode = body.agent_invite_code || queryAgent;
+
+  if (agentInviteCode) {
+    const { data: agentRow, error: agentLookupErr } = await supabase
+      .from("affiliate.promoters")
+      .select("id")
+      .eq("agent_invite_code", agentInviteCode.toUpperCase())
+      .eq("role", "agent")
+      .eq("status", "active")
+      .maybeSingle();
+    if (agentLookupErr) {
+      // Log but don't fail - fall through to referralCode / no-binding.
+      logger.error({ err: agentLookupErr }, "agent_invite_code lookup failed");
+    } else if (agentRow) {
+      recruitedByAgentId = agentRow.id;
+    }
+    // Not found -> ignore (TRD: 找不到 -> 忽略，不报错，正常注册)
   }
-  const agent = codeRow.promoters as { id: string; role: string; status: string } | null;
-  if (!agent || agent.role !== "agent" || agent.status !== "active") {
-    res.status(400).json({ error: { code: "INVALID_REFERRAL_CODE", message: "Referral code does not belong to an active agent" } });
-    return;
+
+  // Fall back to referralCode if agent_invite_code didn't resolve an agent.
+  // Keep the existing 400-on-invalid behavior so user-typed invalid codes
+  // surface a correction prompt rather than silently unbinding.
+  if (!recruitedByAgentId && body.referralCode) {
+    const { data: codeRow, error: codeErr } = await supabase
+      .from("affiliate.referral_codes")
+      .select("promoter_id, promoters!inner(id, role, status)")
+      .eq("code", body.referralCode.toUpperCase())
+      .eq("is_active", true)
+      .maybeSingle();
+    if (codeErr || !codeRow) {
+      res.status(400).json({ error: { code: "INVALID_REFERRAL_CODE", message: "Invalid or inactive referral code" } });
+      return;
+    }
+    // Cast via unknown: Supabase types the !inner relation as an array, but
+    // referral_codes.promoter_id is a many-to-one FK so maybeSingle() returns
+    // a single parent row (not an array). Direct cast errors on the array
+    // type; the runtime shape is a single object.
+    const refCodeAgent = codeRow.promoters as unknown as { id: string; role: string; status: string } | null;
+    if (!refCodeAgent || refCodeAgent.role !== "agent" || refCodeAgent.status !== "active") {
+      res.status(400).json({ error: { code: "INVALID_REFERRAL_CODE", message: "Referral code does not belong to an active agent" } });
+      return;
+    }
+    recruitedByAgentId = refCodeAgent.id;
   }
 
   const { data, error } = await supabase.rpc("affiliate_self_register_promoter", {
@@ -111,7 +166,7 @@ export async function selfRegister(req: Request, res: Response) {
     p_country: body.countryCode,
     p_platform: body.primaryPlatform,
     p_platform_url: body.primaryPlatformUrl,
-    p_recruited_by_agent_id: agent.id,
+    p_recruited_by_agent_id: recruitedByAgentId,
   });
 
   if (error) {

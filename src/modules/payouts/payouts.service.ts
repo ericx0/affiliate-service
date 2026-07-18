@@ -97,8 +97,11 @@ export async function payPromoterGroup(
     return { success: false, error: "No commissions to pay" };
   }
   const sortedIds = [...commissionIds].sort();
-  const month = new Date().toISOString().slice(0, 7); // YYYY-MM
-  const idempotencyKey = `group-payout-${promoterId}-${currency}-${month}-${crypto
+  const month = new Date().toISOString().slice(0, 7); // YYYY-MM (for month_key only)
+  // idempotencyKey must NOT include month: a retry next month for the same
+  // commission set must return the SAME Stripe transfer (at-most-once),
+  // not create a second transfer (double payout). H-AFF-2.
+  const idempotencyKey = `group-payout-${promoterId}-${currency}-${crypto
     .createHash("sha256")
     .update(sortedIds.join(","))
     .digest("hex")

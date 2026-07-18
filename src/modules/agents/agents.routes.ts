@@ -10,6 +10,7 @@ import {
   updateKol,
   getMyCommissions,
   getMyStats,
+  getMyInviteCode,
 } from "./agents.controller.js";
 
 export const agentRouter = Router();
@@ -18,6 +19,7 @@ export const agentRouter = Router();
 // maps to a promoter with role='agent'. See agentAuthMiddleware.
 agentRouter.use(agentAuthMiddleware);
 
+agentRouter.get("/invite-code", getMyInviteCode);
 agentRouter.post("/kols", createKol);
 agentRouter.get("/kols", listKols);
 agentRouter.get("/kols/:id", getKol);

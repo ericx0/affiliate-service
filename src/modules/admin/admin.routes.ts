@@ -17,6 +17,7 @@ import {
   listAuditLogs,
   getDashboardStats,
 } from "./admin.controller.js";
+import { listAgents, listAgentKols } from "./agents.controller.js";
 
 export const adminRouter = Router();
 
@@ -37,6 +38,10 @@ adminRouter.get("/promoters/:id", getPromoter);
 adminRouter.patch("/promoters/:id", updatePromoter);
 adminRouter.post("/promoters/:id/suspend", suspendPromoter);
 adminRouter.post("/promoters/:id/activate", activatePromoter);
+
+// Agents (admin view: list agents + their recruited KOLs)
+adminRouter.get("/agents", listAgents);
+adminRouter.get("/agents/:agentId/kols", listAgentKols);
 
 // Codes
 adminRouter.get("/codes", listCodes);
