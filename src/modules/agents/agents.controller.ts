@@ -21,6 +21,31 @@ interface CommissionTotal {
   commission_amount: number;
 }
 
+interface CommissionRow {
+  promoter_id: string;
+  order_amount?: string | number;
+}
+
+interface KolListRow {
+  id: string;
+  name: string;
+  email: string;
+  status: string;
+  commission_rate: number;
+  primary_platform: string | null;
+  created_at: string;
+  total_commission_earned: number;
+  total_commission_paid: number;
+}
+
+// BigInt columns (order_amount) come back from Supabase as strings to preserve
+// precision. Summing in JS is safe within Number.MAX_SAFE_INTEGER for GMV totals.
+function toNumber(v: string | number | null | undefined): number {
+  if (v === null || v === undefined) return 0;
+  const n = typeof v === "string" ? Number(v) : v;
+  return Number.isFinite(n) ? n : 0;
+}
+
 function parsePaging(req: Request): { limit: number; offset: number } {
   const limit = Math.min(Number(req.query.limit) || 50, 200);
   const offset = Math.max(Number(req.query.offset) || 0, 0);
@@ -74,7 +99,9 @@ export async function createKol(req: Request, res: Response) {
   res.status(201).json(data);
 }
 
-/** GET /api/affiliate/agent/kols - list KOLs this agent recruited (paginated). */
+/** GET /api/affiliate/agent/kols - list KOLs this agent recruited (paginated).
+ *  Each KOL includes gmv_total (sum of order_amount for service/subscription
+ *  commissions) so the portal can render the GMV column (TRD B5). */
 export async function listKols(req: Request, res: Response) {
   const agentId = req.agent?.id;
   if (!agentId) {
@@ -83,7 +110,7 @@ export async function listKols(req: Request, res: Response) {
   }
   const { limit, offset } = parsePaging(req);
 
-  const { data, error, count } = await supabase
+  const { data: kols, error, count } = await supabase
     .from("affiliate.promoters")
     .select(
       "id, name, email, status, commission_rate, primary_platform, created_at, total_commission_earned, total_commission_paid",
@@ -97,7 +124,37 @@ export async function listKols(req: Request, res: Response) {
     internalError(res, "QUERY_FAILED", error);
     return;
   }
-  res.json({ data: data ?? [], total: count ?? 0 });
+
+  const kolList = (kols ?? []) as KolListRow[];
+  const kolIds = kolList.map((k) => k.id);
+
+  // Aggregate GMV per KOL: sum of order_amount for the KOL's own
+  // service/subscription commissions. Mirrors admin listAgentKols.
+  const gmvByKol = new Map<string, number>();
+  if (kolIds.length > 0) {
+    const { data: comms, error: commsErr } = await supabase
+      .from("affiliate.commissions")
+      .select("promoter_id, order_amount")
+      .in("promoter_id", kolIds)
+      .in("commission_type", ["service", "subscription"]);
+    if (commsErr) {
+      logger.error({ err: commsErr }, "agent listKols: gmv query failed");
+    } else {
+      for (const c of (comms ?? []) as CommissionRow[]) {
+        gmvByKol.set(
+          c.promoter_id,
+          (gmvByKol.get(c.promoter_id) ?? 0) + toNumber(c.order_amount),
+        );
+      }
+    }
+  }
+
+  const data = kolList.map((k) => ({
+    ...k,
+    gmv_total: gmvByKol.get(k.id) ?? 0,
+  }));
+
+  res.json({ data, total: count ?? 0 });
 }
 
 /** GET /api/affiliate/agent/kols/:id - KOL detail (ownership enforced). */
