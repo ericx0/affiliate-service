@@ -2,7 +2,13 @@ import { Request, Response } from "express";
 import { z } from "zod";
 import { logger } from "../../utils/logger.js";
 import { supabase } from "../../config.js";
-import { attachToOrder, transition, agentCommissionType } from "../commissions/commissions.service.js";
+import {
+  attachToOrder,
+  transition,
+  agentCommissionType,
+  reversePaidCommission,
+} from "../commissions/commissions.service.js";
+import { calculateRefundDeduction } from "../commissions/refund-helpers.js";
 import { Commission } from "../commissions/commissions.types.js";
 import { internalError } from "../../utils/controller-error.js";
 
@@ -168,50 +174,77 @@ export async function onOrderRefunded(req: Request, res: Response) {
     return internalError(res, "REFUND_EVENT_CLAIM_FAILED", { message: claimErr.message });
   }
 
-  // 2. AS-P1-5: For now, only support FULL refunds. Partial refund
-  //    requires cumulative tracking on commissions (cumulative_refunded
-  //    column) that does not yet exist — would otherwise allow compound
-  //    reduction on replay. Reject partial explicitly so callers know.
+  // 2. Partial-refund aware: process each commission with proportional
+  //    deduction. refundAmount undefined = full refund. Cumulative tracking
+  //    via cumulative_refunded_amount prevents compound reduction on replay.
   const commissions = await getCommissionsForOrder(orderId);
   if (commissions.length === 0) {
     logger.info({ orderId }, "no commissions to refund");
     return res.json({ success: true, commissionsAffected: 0 });
   }
 
-  const isPartial = commissions.some(
-    (c) => refundAmount !== undefined && refundAmount < c.order_amount,
-  );
-  if (isPartial) {
-    logger.warn(
-      { orderId, refundAmount },
-      "partial refund rejected — cumulative tracking not yet implemented",
-    );
-    return res.status(501).json({
-      error: {
-        code: "PARTIAL_REFUND_UNSUPPORTED",
-        message: "Partial refunds require cumulative tracking migration; not yet implemented.",
-      },
-    });
-  }
-
   let count = 0;
   for (const c of commissions) {
-    // Idempotency at the commission level: skip rows already in a
-    // terminal-refund state. transition() also enforces source-state
-    // CAS, but the explicit skip is clearer and avoids an unnecessary
-    // UPDATE round-trip.
+    // Skip terminal-refund rows (idempotency at commission level).
     if (c.status === "refunded" || c.status === "reversed") continue;
 
-    const result = await transition(c.id, "refunded", {
-      refund_reason: reason || "Customer refund",
+    // clamp: effective refund = min(refundAmount, remaining). Undefined = full.
+    const orderAmount = Number(c.order_amount);
+    const alreadyRefunded = Number(c.cumulative_refunded_amount);
+    const remaining = orderAmount - alreadyRefunded;
+    const effectiveRefund = refundAmount !== undefined
+      ? Math.min(refundAmount, remaining)
+      : orderAmount;
+    if (effectiveRefund <= 0) continue;  // already fully refunded
+
+    const { deductAmount } = calculateRefundDeduction({
+      orderAmount,
+      commissionAmount: Number(c.commission_amount),
+      refundAmount: effectiveRefund,
     });
-    if (result.success) count++;
+
+    // paid status: reverse the Stripe transfer (partial). On failure, skip
+    // the DB update so the webhook retry (idempotency-protected) re-attempts.
+    if (c.status === "paid" && c.stripe_transfer_id) {
+      const rev = await reversePaidCommission(
+        c.id, deductAmount, reason || "Customer refund", eventId,
+      );
+      if (!rev.success) {
+        logger.error({ commissionId: c.id, eventId }, "Stripe reversal failed; skipping DB update");
+        continue;
+      }
+    }
+
+    const newCumulative = alreadyRefunded + effectiveRefund;
+    const newCommissionAmount = Math.round((Number(c.commission_amount) - deductAmount) * 100) / 100;
+    const isFullyRefunded = newCumulative >= orderAmount;
+
+    if (isFullyRefunded) {
+      // Cumulative refund reached order_amount: transition to terminal.
+      // paid -> reversed (payout was reversed above); others -> refunded.
+      const targetStatus = c.status === "paid" ? "reversed" : "refunded";
+      const result = await transition(c.id, targetStatus, {
+        refund_reason: reason || "Customer refund",
+        commission_amount: newCommissionAmount,
+        cumulative_refunded_amount: newCumulative,
+      });
+      if (result.success) count++;
+    } else {
+      // Partial refund: keep status, only adjust amounts (CAS: status match).
+      const { error: updErr } = await supabase
+        .from("commissions")
+        .update({
+          commission_amount: newCommissionAmount,
+          cumulative_refunded_amount: newCumulative,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", c.id)
+        .in("status", [c.status]);
+      if (!updErr) count++;
+    }
   }
 
-  logger.info(
-    { eventId, orderId, count, refundAmount },
-    "order refunded event processed",
-  );
+  logger.info({ eventId, orderId, count, refundAmount }, "order refunded event processed");
   res.json({ success: true, commissionsAffected: count });
 }
 
