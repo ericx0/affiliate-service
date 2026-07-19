@@ -9,6 +9,7 @@ const { state } = vi.hoisted(() => ({
     commissions: [] as Record<string, any>[],
     insertError: null as null | { code: string; message: string },
     updateCalls: [] as any[],
+    refundEventDeletes: [] as string[],
   },
 }));
 
@@ -22,6 +23,12 @@ vi.mock("../../config.js", () => ({
       if (table === "affiliate.refund_events") {
         return {
           insert: vi.fn(async () => ({ error: state.insertError })),
+          delete: vi.fn(() => ({
+            eq: vi.fn((col: string, val: string) => {
+              state.refundEventDeletes.push(`${col}=${val}`);
+              return { error: null };
+            }),
+          })),
         };
       }
       // commissions table
@@ -114,6 +121,7 @@ describe("onOrderRefunded - partial refund", () => {
     vi.clearAllMocks();
     state.insertError = null;
     state.updateCalls = [];
+    state.refundEventDeletes = [];
   });
 
   it("deducts commission proportionally for partial refund (cooling_down)", async () => {
@@ -349,6 +357,115 @@ describe("onOrderRefunded - partial refund", () => {
       expect.objectContaining({
         status: "refunded",
         cumulative_refunded_amount: 2000,
+      }),
+    );
+  });
+
+  it("Stripe reversal failure: returns 500 + rolls back refund_events claim; retry succeeds", async () => {
+    // First call: Stripe createReversal throws -> controller must roll back
+    // the refund_events claim (DELETE by event_id) + return 500 so Stripe
+    // retries the webhook. No commission_amount update should be applied.
+    stageCommission({
+      id: "c_retry",
+      status: "paid",
+      stripe_transfer_id: "tr_retry",
+      commission_amount: 100,
+      order_amount: 2000,
+    });
+    const stripeErr = new Error("Stripe API timeout");
+    (stripe.transfers.createReversal as any).mockRejectedValueOnce(stripeErr);
+
+    const req1: any = {
+      body: { eventId: "evt_retry_1", orderId: UUID, refundAmount: 400, reason: "retry test" },
+    };
+    const r1 = makeRes();
+    await onOrderRefunded(req1, r1.res);
+    // 500 response so Stripe retries the webhook
+    expect(r1.status).toHaveBeenCalledWith(500);
+    expect(r1.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: expect.objectContaining({ code: "STRIPE_REVERSAL_FAILED" }) }),
+    );
+    // refund_events claim rolled back so retry re-processes from scratch
+    expect(state.refundEventDeletes).toContain("event_id=evt_retry_1");
+    // No commission_amount update applied on failure
+    expect(state.updateCalls.length).toBe(0);
+
+    // Second call: Stripe createReversal succeeds -> full flow completes.
+    state.updateCalls = [];
+    state.refundEventDeletes = [];
+    state.insertError = null;  // refund_events insert succeeds on retry
+    const req2: any = {
+      body: { eventId: "evt_retry_1", orderId: UUID, refundAmount: 400, reason: "retry test" },
+    };
+    const r2 = makeRes();
+    await onOrderRefunded(req2, r2.res);
+    expect(r2.json).toHaveBeenCalledWith(expect.objectContaining({ success: true, commissionsAffected: 1 }));
+    expect(r2.status).not.toHaveBeenCalledWith(500);
+    // Stripe reversal called with eventId-scoped idempotency key (reuses same key on retry)
+    expect(stripe.transfers.createReversal).toHaveBeenCalledWith(
+      "tr_retry",
+      expect.objectContaining({
+        amount: 20,  // 20% of 100 = 20 (cents)
+        metadata: expect.objectContaining({ eventId: "evt_retry_1" }),
+      }),
+      { idempotencyKey: "commission-reverse-c_retry-evt_retry_1" },
+    );
+    // DB updated with new amounts (100 -> 80, cumulative 0 -> 400)
+    expect(state.updateCalls).toContainEqual(
+      expect.objectContaining({
+        commission_amount: 80,
+        cumulative_refunded_amount: 400,
+      }),
+    );
+    // No refund_events DELETE on success
+    expect(state.refundEventDeletes.length).toBe(0);
+  });
+
+  it("multi-commission independent deduction: service + agent_service both adjusted", async () => {
+    // Same order with two commission rows (KOL service + agent_service override).
+    // Partial refund 400 (20% of order_amount 2000) -> each row independently
+    // deducts 20% of its commission_amount. commissionsAffected = 2.
+    const kol = {
+      id: "c_kol",
+      status: "cooling_down",
+      order_amount: 2000,
+      commission_amount: 100,   // 5% of 2000 (KOL)
+      cumulative_refunded_amount: 0,
+      stripe_transfer_id: null,
+    };
+    const agent = {
+      id: "c_agent",
+      status: "cooling_down",
+      order_amount: 2000,
+      commission_amount: 20,    // 1% of 2000 (agent override)
+      cumulative_refunded_amount: 0,
+      stripe_transfer_id: null,
+    };
+    state.commissions = [kol, agent];
+    state.commission = kol;  // single() returns whatever; not used in loop path
+    state.insertError = null;
+    state.updateCalls = [];
+
+    const req: any = {
+      body: { eventId: "evt_multi_commission", orderId: UUID, refundAmount: 400, reason: "multi" },
+    };
+    const { json, status, res } = makeRes();
+    await onOrderRefunded(req, res);
+    expect(status).not.toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({ success: true, commissionsAffected: 2 }));
+
+    // KOL: 100 - 20% (20) = 80, cumulative 0 -> 400
+    expect(state.updateCalls).toContainEqual(
+      expect.objectContaining({
+        commission_amount: 80,
+        cumulative_refunded_amount: 400,
+      }),
+    );
+    // Agent: 20 - 20% (4) = 16, cumulative 0 -> 400
+    expect(state.updateCalls).toContainEqual(
+      expect.objectContaining({
+        commission_amount: 16,
+        cumulative_refunded_amount: 400,
       }),
     );
   });

@@ -197,26 +197,40 @@ export async function onOrderRefunded(req: Request, res: Response) {
       : orderAmount;
     if (effectiveRefund <= 0) continue;  // already fully refunded
 
-    const { deductAmount } = calculateRefundDeduction({
+    const { deductAmount, newCommissionAmount } = calculateRefundDeduction({
       orderAmount,
       commissionAmount: Number(c.commission_amount),
       refundAmount: effectiveRefund,
     });
 
-    // paid status: reverse the Stripe transfer (partial). On failure, skip
-    // the DB update so the webhook retry (idempotency-protected) re-attempts.
+    // paid status: reverse the Stripe transfer (partial). On failure, roll
+    // back the refund_events claim for this eventId and return 500 so Stripe
+    // retries the webhook. Commissions reversed earlier in this loop keep
+    // their DB updates (CAS by status protects them on retry); the failed
+    // commission retries via its eventId-scoped Stripe idempotency key.
     if (c.status === "paid" && c.stripe_transfer_id) {
       const rev = await reversePaidCommission(
         c.id, deductAmount, reason || "Customer refund", eventId,
       );
       if (!rev.success) {
-        logger.error({ commissionId: c.id, eventId }, "Stripe reversal failed; skipping DB update");
-        continue;
+        logger.error(
+          { commissionId: c.id, eventId, error: rev.error },
+          "Stripe reversal failed; rolling back refund_events claim and returning 500 for webhook retry",
+        );
+        await supabase
+          .from("affiliate.refund_events")
+          .delete()
+          .eq("event_id", eventId);
+        return internalError(
+          res,
+          "STRIPE_REVERSAL_FAILED",
+          { eventId, commissionId: c.id, error: rev.error },
+          { eventId, commissionId: c.id },
+        );
       }
     }
 
     const newCumulative = alreadyRefunded + effectiveRefund;
-    const newCommissionAmount = Math.round((Number(c.commission_amount) - deductAmount) * 100) / 100;
     const isFullyRefunded = newCumulative >= orderAmount;
 
     if (isFullyRefunded) {
