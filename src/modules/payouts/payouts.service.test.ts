@@ -151,17 +151,17 @@ describe("groupCommissionsByPromoter", () => {
 });
 
 describe("exceedsMinimum", () => {
-  it("USD $50 threshold", () => {
-    expect(exceedsMinimum(50, "USD")).toBe(true);
-    expect(exceedsMinimum(49.99, "USD")).toBe(false);
+  it("USD $50 threshold (amounts in cents)", () => {
+    expect(exceedsMinimum(5000, "USD")).toBe(true);
+    expect(exceedsMinimum(4999, "USD")).toBe(false);
   });
   it("non-USD always passes (no threshold defined)", () => {
-    expect(exceedsMinimum(0.01, "EUR")).toBe(true);
+    expect(exceedsMinimum(1, "EUR")).toBe(true);
   });
 });
 
 describe("MINIMUM_PAYOUT_AMOUNT", () => {
-  it("is $50", () => {
-    expect(MINIMUM_PAYOUT_AMOUNT).toBe(50);
+  it("is $50 in cents", () => {
+    expect(MINIMUM_PAYOUT_AMOUNT).toBe(5000);
   });
 });

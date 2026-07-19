@@ -1,4 +1,7 @@
-export const MINIMUM_PAYOUT_AMOUNT = 50;  // USD
+// Minimum payout threshold in CENTS ($50.00). commission_amount /
+// group.total are integer cents (BIGINT since migration 010), so the
+// threshold must be compared in the same unit.
+export const MINIMUM_PAYOUT_AMOUNT = 5000;
 
 export interface CommissionForPayout {
   id: string;

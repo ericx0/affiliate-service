@@ -23,6 +23,7 @@ export interface Commission {
   approved_at: string | null;
   paid_at: string | null;
   refunded_at: string | null;
+  // Cumulative refunded order amount in CENTS (matches order_amount unit).
   cumulative_refunded_amount: number;
   stripe_transfer_id: string | null;
   month_key: string | null;

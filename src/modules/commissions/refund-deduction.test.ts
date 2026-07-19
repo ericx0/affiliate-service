@@ -36,16 +36,16 @@ describe("calculateRefundDeduction", () => {
     expect(second.newCommissionAmount).toBeCloseTo(30, 0);  // 50 * 0.8 * 0.75 = 30
   });
 
-  it("rounds to 2 decimals for dollar amounts with cents", () => {
-    // commission 49.99, order 200.00, refund 50.00 (25%)
-    // deduct = 49.99 * 50 / 200 = 12.4975 -> 12.50 (2-decimal round)
+  it("rounds to integer cents", () => {
+    // commission 4999c, order 20000c, refund 5000c (25%)
+    // deduct = 4999 * 5000 / 20000 = 1249.75 -> 1250 (integer-cent round)
     const result = calculateRefundDeduction({
-      orderAmount: 200,
-      commissionAmount: 49.99,
-      refundAmount: 50,
+      orderAmount: 20000,
+      commissionAmount: 4999,
+      refundAmount: 5000,
     });
-    expect(result.deductAmount).toBe(12.50);
-    expect(result.newCommissionAmount).toBe(37.49);
+    expect(result.deductAmount).toBe(1250);
+    expect(result.newCommissionAmount).toBe(3749);
   });
 });
 

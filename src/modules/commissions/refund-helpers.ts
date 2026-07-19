@@ -1,5 +1,7 @@
 export interface RefundDeductionInput {
-  // All amounts are in dollars (NUMERIC(12,2), 2-decimal rounding).
+  // All amounts are integer CENTS (matches affiliate.commissions columns:
+  // order_amount / commission_amount are BIGINT cents since migration
+  // 20260713000002; cumulative_refunded_amount is BIGINT cents too).
   orderAmount: number;
   commissionAmount: number;
   refundAmount: number;
@@ -12,15 +14,14 @@ export interface RefundDeductionResult {
 }
 
 export function calculateRefundDeduction(input: RefundDeductionInput): RefundDeductionResult {
-  // Dollar math with 2-decimal rounding (matches commissions table NUMERIC(12,2)).
-  // refundPercentage is the only non-rounded output (it's a percentage).
+  // Integer-cent math: no float drift, and the result can be passed
+  // straight to Stripe (transfer reversal amounts are integer cents).
+  // refundPercentage is the only non-integer output (it's a percentage).
   const refundPercentage = (input.refundAmount / input.orderAmount) * 100;
   const deductAmount = Math.round(
-    ((input.commissionAmount * input.refundAmount) / input.orderAmount) * 100,
-  ) / 100;
-  const newCommissionAmount = Math.round(
-    (input.commissionAmount - deductAmount) * 100,
-  ) / 100;
+    (input.commissionAmount * input.refundAmount) / input.orderAmount,
+  );
+  const newCommissionAmount = input.commissionAmount - deductAmount;
   return {
     deductAmount,
     newCommissionAmount,
