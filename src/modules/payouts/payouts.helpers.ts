@@ -21,12 +21,17 @@ export function groupCommissionsByPromoter(commissions: CommissionForPayout[]): 
   const groups = new Map<string, PromoterPayoutGroup>();
 
   for (const c of commissions) {
-    const existing = groups.get(c.promoter_id);
+    // Key by promoter_id + currency: a promoter with commissions in
+    // multiple currencies gets a separate payout group per currency (P1 -
+    // otherwise the second currency's amount would be paid under the first
+    // currency's Stripe transfer).
+    const key = `${c.promoter_id}:${c.currency}`;
+    const existing = groups.get(key);
     if (existing) {
       existing.total += c.commission_amount;
       existing.commissionIds.push(c.id);
     } else {
-      groups.set(c.promoter_id, {
+      groups.set(key, {
         promoterId: c.promoter_id,
         currency: c.currency,
         total: c.commission_amount,
