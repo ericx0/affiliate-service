@@ -19,7 +19,26 @@ const SelfRegisterSchema = z.object({
   // affiliate.promoters.agent_invite_code. Accept from body OR ?agent= query
   // (the latter lets /register?agent=CODE work without client-side parsing).
   agent_invite_code: z.string().min(1).max(50).optional(),
+  // ESIGN consent: the KOL checked the clickwrap agreeing to the NDA /
+  // Affiliate Agreement. Their typed `name` above serves as the
+  // electronic signature (recorded in documents.signings).
+  consent_confirmed: z.boolean().refine((v) => v === true, {
+    message: "consent_confirmed must be true",
+  }),
 });
+
+/** Extract client IP for e-signature evidence. CF-Connecting-IP first
+ *  (Cloudflare), then X-Forwarded-For, then Express req.ip. */
+function extractClientIp(req: Request): string | null {
+  const cf = req.get("cf-connecting-ip");
+  if (cf && cf.trim()) return cf.trim();
+  const xff = req.get("x-forwarded-for");
+  if (xff) {
+    const first = xff.split(",")[0]?.trim();
+    if (first) return first;
+  }
+  return req.ip ?? null;
+}
 
 /**
  * POST /api/affiliate/auth/register
@@ -90,6 +109,27 @@ export async function selfRegister(req: Request, res: Response) {
   if (body.authUserId !== user.id) {
     res.status(403).json({
       error: { code: "USER_MISMATCH", message: "authUserId does not match the authenticated user" },
+    });
+    return;
+  }
+
+  // Resolve the active NDA template for the clickwrap consent record
+  // (ESIGN Act: the signature must be tied to a specific document
+  // version via content_hash). Fail-fast BEFORE creating the promoter
+  // so a missing template doesn't leave a promoter without a recorded NDA.
+  const { data: ndaTemplate, error: ndaErr } = await supabase
+    .schema("documents")
+    .from("templates")
+    .select("id, content_hash, version")
+    .eq("type", "nda")
+    .eq("is_active", true)
+    .order("version", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (ndaErr || !ndaTemplate) {
+    logger.error({ err: ndaErr }, "NDA template missing - cannot record clickwrap consent");
+    res.status(503).json({
+      error: { code: "NDA_TEMPLATE_MISSING", message: "NDA template not configured; cannot record consent. Please contact support." },
     });
     return;
   }
@@ -179,6 +219,40 @@ export async function selfRegister(req: Request, res: Response) {
     }
     internalError(res, "REGISTER_FAILED", error);
     return;
+  }
+
+  // Record the clickwrap NDA consent in documents.signings (ESIGN Act).
+  // The promoter already exists; a failure here is logged loudly but does
+  // NOT fail the registration (ops reconciles). signature_text is the typed
+  // name (clickwrap signature); signed_content_hash ties to the NDA version.
+  const promoterId: string | null = data?.promoter?.id ?? null;
+  if (promoterId) {
+    const { error: signErr } = await supabase
+      .schema("documents")
+      .from("signings")
+      .insert({
+        template_id: ndaTemplate.id,
+        signer_email: body.email,
+        signer_name: body.name,
+        signer_type: "kol",
+        promoter_id: promoterId,
+        status: "signed",
+        signed_at: new Date().toISOString(),
+        signed_ip: extractClientIp(req),
+        signed_ua: req.get("user-agent") ?? null,
+        signature_text: body.name,
+        signed_content_hash: ndaTemplate.content_hash,
+        invited_by_email: null,
+        notes: "clickwrap consent at registration",
+      });
+    if (signErr) {
+      logger.error(
+        { err: signErr, promoterId, email: body.email },
+        "FAILED to record NDA clickwrap consent in documents.signings",
+      );
+    }
+  } else {
+    logger.warn({ email: body.email }, "promoter_id missing from RPC response; NDA consent not recorded");
   }
 
   res.status(201).json(data);

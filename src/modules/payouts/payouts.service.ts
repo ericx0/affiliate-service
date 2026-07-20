@@ -13,6 +13,27 @@ export interface PayoutResult {
 }
 
 /**
+ * IRS compliance gate (P0-6): a promoter must have submitted a W-9/W-8BEN
+ * tax form (status 'submitted' or 'valid') before any payout. Returns
+ * { ok: false, reason } if not; the caller returns it as the payout error.
+ */
+async function assertTaxFormSubmitted(promoterId: string): Promise<{ ok: boolean; reason?: string }> {
+  const { data, error } = await supabase
+    .from("affiliate.tax_forms")
+    .select("status")
+    .eq("promoter_id", promoterId)
+    .maybeSingle();
+  if (error) {
+    logger.error({ err: error, promoterId }, "tax_forms check failed");
+    return { ok: false, reason: "Tax form check failed" };
+  }
+  if (!data || !["submitted", "valid"].includes(data.status)) {
+    return { ok: false, reason: "Tax form (W-9/W-8BEN) required before payout. Submit it in the portal." };
+  }
+  return { ok: true };
+}
+
+/**
  * Pay a single commission. Used by the admin manual-payout flow when a
  * promoter has a one-off transfer (no group). Idempotent by commission id.
  */
@@ -35,6 +56,12 @@ export async function paySingleCommission(commissionId: string): Promise<PayoutR
   const promoter = commission.promoters as any;
   if (!promoter?.stripe_account_id || !promoter.stripe_onboarding_completed) {
     return { success: false, error: "Promoter Stripe Connect not set up" };
+  }
+
+  // IRS compliance gate (P0-6): no payout without a submitted tax form.
+  const taxCheck = await assertTaxFormSubmitted(commission.promoter_id);
+  if (!taxCheck.ok) {
+    return { success: false, error: taxCheck.reason! };
   }
 
   // commission_amount is already in cents (integer).
@@ -114,6 +141,12 @@ export async function payPromoterGroup(
     .single();
   if (promoterErr || !promoter?.stripe_account_id || !promoter.stripe_onboarding_completed) {
     return { success: false, error: "Promoter Stripe Connect not set up" };
+  }
+
+  // IRS compliance gate (P0-6): no payout without a submitted tax form.
+  const taxCheck = await assertTaxFormSubmitted(promoterId);
+  if (!taxCheck.ok) {
+    return { success: false, error: taxCheck.reason! };
   }
 
   // totalAmount is already in cents (integer).

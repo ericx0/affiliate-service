@@ -225,3 +225,80 @@ export async function createMyCode(req: Request, res: Response) {
   }
   internalError(res, "CODE_GEN_FAILED", new Error("could not generate a unique code after 10 attempts"));
 }
+
+const SubmitTaxFormSchema = z.object({
+  form_type: z.enum(["W9", "W8BEN"]),
+  signer_name: z.string().min(1).max(200),
+  file_path: z.string().min(1).max(500),
+});
+
+/**
+ * POST /me/tax-form - submit/upsert the KOL's tax form (W-9/W-8BEN) for
+ * IRS compliance. The signed PDF is uploaded by the portal directly to
+ * the private `tax-forms` storage bucket (RLS-scoped to the KOL's
+ * auth_uid folder); this endpoint records the metadata in
+ * affiliate.tax_forms. file_path must be in the caller's own folder
+ * (prevents recording someone else's file). One row per promoter
+ * (UNIQUE(promoter_id) + upsert = replace on re-submit).
+ */
+export async function submitMyTaxForm(req: Request, res: Response) {
+  const promoterId = req.promoter?.id;
+  const authUid = req.kolUser?.id;
+  if (!promoterId || !authUid) {
+    res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing promoter context" } });
+    return;
+  }
+  const parsed = SubmitTaxFormSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { code: "VALIDATION_ERROR", message: parsed.error.flatten() } });
+    return;
+  }
+  const { form_type, signer_name, file_path } = parsed.data;
+  const ownPrefix = `${authUid}/`;
+  if (!file_path.startsWith(ownPrefix) || file_path.includes("..")) {
+    res.status(403).json({ error: { code: "FORBIDDEN_PATH", message: "file_path must be in your own storage folder" } });
+    return;
+  }
+  const { data, error } = await supabase
+    .from("affiliate.tax_forms")
+    .upsert(
+      {
+        promoter_id: promoterId,
+        form_type,
+        signer_name,
+        file_path,
+        status: "submitted",
+        submitted_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "promoter_id" },
+    )
+    .select("id, form_type, signer_name, status, submitted_at")
+    .single();
+  if (error) {
+    internalError(res, "TAX_FORM_UPSERT_FAILED", error);
+    return;
+  }
+  res.status(201).json({ data });
+}
+
+/**
+ * GET /me/tax-form - the KOL's current tax form (or null if none submitted).
+ */
+export async function getMyTaxForm(req: Request, res: Response) {
+  const promoterId = req.promoter?.id;
+  if (!promoterId) {
+    res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing promoter context" } });
+    return;
+  }
+  const { data, error } = await supabase
+    .from("affiliate.tax_forms")
+    .select("id, form_type, signer_name, status, submitted_at, updated_at")
+    .eq("promoter_id", promoterId)
+    .maybeSingle();
+  if (error) {
+    internalError(res, "QUERY_FAILED", error);
+    return;
+  }
+  res.status(200).json({ data: data ?? null });
+}
