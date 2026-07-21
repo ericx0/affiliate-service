@@ -8,6 +8,7 @@ const mockState = vi.hoisted(() => ({
   promoterById: new Map<string, any>(),
   transitionResult: { success: true, commission: { id: "x" } as any },
   transitions: [] as Array<{ id: string; to: string; metadata: any }>,
+  taxFormStatus: "submitted" as string | null,
 }));
 
 vi.mock("../../config.js", () => ({
@@ -27,6 +28,18 @@ vi.mock("../../config.js", () => ({
                 if (!p) return { data: null, error: { message: "not found" } };
                 return { data: p, error: null };
               },
+            }),
+          }),
+        };
+      }
+      if (table === "affiliate.tax_forms") {
+        return {
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () =>
+                mockState.taxFormStatus
+                  ? { data: { status: mockState.taxFormStatus }, error: null }
+                  : { data: null, error: null },
             }),
           }),
         };
@@ -53,6 +66,7 @@ beforeEach(() => {
   mockState.stripeTransfersCreate.mockReset();
   mockState.promoterById.clear();
   mockState.transitions = [];
+  mockState.taxFormStatus = "submitted";
   mockState.promoterById.set("p1", {
     stripe_account_id: "acct_1",
     stripe_onboarding_completed: true,
@@ -120,6 +134,14 @@ describe("payPromoterGroup — F29 regression", () => {
     expect(mockState.stripeTransfersCreate).not.toHaveBeenCalled();
   });
 
+  it("refuses promoter without a submitted tax form (IRS gate)", async () => {
+    mockState.taxFormStatus = null;
+    const result = await payPromoterGroup("p1", "USD", ["c1"], 8000);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/tax form/i);
+    expect(mockState.stripeTransfersCreate).not.toHaveBeenCalled();
+  });
+
   it("passes integer cents through unchanged", async () => {
     await payPromoterGroup("p1", "USD", ["c1", "c2"], 10000);
     expect(mockState.stripeTransfersCreate.mock.calls[0][0].amount).toBe(10000);
@@ -127,7 +149,7 @@ describe("payPromoterGroup — F29 regression", () => {
 });
 
 describe("groupCommissionsByPromoter", () => {
-  it("groups approved commissions by promoter_id (amounts in cents)", () => {
+  it("groups approved commissions by promoter_id + currency (amounts in cents)", () => {
     const commissions = [
       { id: "c1", promoter_id: "p1", commission_amount: 5000, currency: "USD" },
       { id: "c2", promoter_id: "p1", commission_amount: 3000, currency: "USD" },
@@ -135,9 +157,9 @@ describe("groupCommissionsByPromoter", () => {
     ];
     const groups = groupCommissionsByPromoter(commissions as any);
     expect(groups.size).toBe(2);
-    expect(groups.get("p1")?.total).toBe(8000);
-    expect(groups.get("p2")?.total).toBe(10000);
-    expect(groups.get("p1")?.commissionIds).toEqual(["c1", "c2"]);
+    expect(groups.get("p1:USD")?.total).toBe(8000);
+    expect(groups.get("p2:USD")?.total).toBe(10000);
+    expect(groups.get("p1:USD")?.commissionIds).toEqual(["c1", "c2"]);
   });
 
   it("handles different currencies separately", () => {
@@ -146,7 +168,11 @@ describe("groupCommissionsByPromoter", () => {
       { id: "c2", promoter_id: "p1", commission_amount: 3000, currency: "EUR" },
     ];
     const groups = groupCommissionsByPromoter(commissions as any);
-    expect(groups.get("p1")?.total).toBe(8000);
+    // Separate groups per currency — the EUR amount must NOT be folded into
+    // the USD transfer (that was the pre-fix bug).
+    expect(groups.size).toBe(2);
+    expect(groups.get("p1:USD")?.total).toBe(5000);
+    expect(groups.get("p1:EUR")?.total).toBe(3000);
   });
 });
 
