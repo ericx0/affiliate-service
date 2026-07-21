@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { logger } from "../../utils/logger.js";
 import { approveExpiredCooldowns } from "../commissions/commissions.service.js";
 import { payCommissions } from "../payouts/payouts.service.js";
+import { scanRecentCommissions } from "../fraud/fraud.service.js";
 import { supabase } from "../../config.js";
 import { internalError } from "../../utils/controller-error.js";
 
@@ -67,6 +68,16 @@ cronRouter.get("/monthly-payout", async (_req, res) => {
     return res.json({ success: true, total: results.length, successful });
   } catch (err: any) {
     logger.error({ err }, "Cron: monthly-payout failed");
+    return internalError(res, "CRON_FAILED", err);
+  }
+});
+
+cronRouter.get("/fraud-scan", async (_req, res) => {
+  try {
+    const flagged = await scanRecentCommissions(90);
+    return res.json({ success: true, flagged });
+  } catch (err: any) {
+    logger.error({ err }, "Cron: fraud-scan failed");
     return internalError(res, "CRON_FAILED", err);
   }
 });

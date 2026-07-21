@@ -4,7 +4,8 @@ export type CommissionStatus =
   | "approved"
   | "paid"
   | "refunded"
-  | "reversed";
+  | "reversed"
+  | "voided";
 
 export type CommissionType = "service" | "subscription" | "agent_service" | "agent_subscription";
 
@@ -49,12 +50,13 @@ export interface TransitionResult {
 
 // State transition table (spec section 6.2)
 export const VALID_TRANSITIONS: Record<CommissionStatus, CommissionStatus[]> = {
-  cooling_down: ["approved", "refunded"],
-  pending: ["cooling_down", "refunded"],
-  approved: ["paid", "refunded"],
+  cooling_down: ["approved", "refunded", "voided"],
+  pending: ["cooling_down", "refunded", "voided"],
+  approved: ["paid", "refunded", "voided"],
   paid: ["reversed"],
   refunded: [],   // terminal
   reversed: [],   // terminal
+  voided: [],     // terminal (fraud review: commission cancelled, never paid)
 };
 
 export function canTransition(from: CommissionStatus, to: CommissionStatus): boolean {

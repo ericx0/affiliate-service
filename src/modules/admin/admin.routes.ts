@@ -18,6 +18,7 @@ import {
   getDashboardStats,
 } from "./admin.controller.js";
 import { listAgents, listAgentKols } from "./agents.controller.js";
+import { listFraudFlags, resolveFraudFlag } from "../fraud/fraud.admin.controller.js";
 
 export const adminRouter = Router();
 
@@ -53,6 +54,10 @@ adminRouter.post("/commissions/:id/reverse", reverseCommission);
 
 // Refunds (read-only)
 adminRouter.get("/refunds", listRefunds);
+
+// Fraud review queue (self-referral anti-fraud L3)
+adminRouter.get("/fraud-flags", listFraudFlags);
+adminRouter.post("/fraud-flags/:id/resolve", resolveFraudFlag);
 
 // Payouts (read-only)
 adminRouter.get("/payouts", listPayouts);

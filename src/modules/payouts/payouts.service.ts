@@ -3,6 +3,7 @@ import { stripe, supabase } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { transition } from "../commissions/commissions.service.js";
 import { groupCommissionsByPromoter, exceedsMinimum } from "./payouts.helpers.js";
+import { getOpenFlaggedCommissionIds } from "../fraud/fraud.service.js";
 
 export interface PayoutResult {
   success: boolean;
@@ -236,8 +237,23 @@ export async function payCommissions(commissionIds: string[]): Promise<PayoutRes
     return [{ success: false, error: "Failed to fetch commissions" }];
   }
 
-  const groups = groupCommissionsByPromoter(commissions as any);
-  const results: PayoutResult[] = [];
+  // Anti-fraud gate: commissions with an OPEN fraud flag are held out of
+  // the batch until an admin resolves the flag (fail-closed on lookup
+  // error — see getOpenFlaggedCommissionIds).
+  const flaggedIds = await getOpenFlaggedCommissionIds(
+    commissions.map((c: any) => c.id as string),
+  );
+  const payable = (commissions as any[]).filter((c) => !flaggedIds.has(c.id));
+  const withheld: PayoutResult[] = (commissions as any[])
+    .filter((c) => flaggedIds.has(c.id))
+    .map((c) => ({
+      success: false,
+      error: "Under fraud review — payout withheld pending admin resolution",
+      commissionIds: [c.id],
+    }));
+
+  const groups = groupCommissionsByPromoter(payable as any);
+  const results: PayoutResult[] = [...withheld];
 
   for (const group of groups.values()) {
     if (!exceedsMinimum(group.total, group.currency)) {

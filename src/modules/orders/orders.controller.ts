@@ -10,6 +10,7 @@ import {
 } from "../commissions/commissions.service.js";
 import { calculateRefundDeduction } from "../commissions/refund-helpers.js";
 import { Commission } from "../commissions/commissions.types.js";
+import { checkSelfReferral } from "../fraud/fraud.service.js";
 import { internalError } from "../../utils/controller-error.js";
 
 const AttachSchema = z.object({
@@ -32,6 +33,15 @@ export async function attach(req: Request, res: Response) {
 
   if (!promoter || promoter.status !== "active") {
     return res.status(400).json({ error: { code: "INVALID_PROMOTER", message: "Promoter not active" } });
+  }
+
+  // L1 anti-fraud (Code of Conduct §3 / Commission Rules §6): a promoter
+  // buying through their own referral link is a self-referral — block the
+  // attach, raise a fraud flag for admin review, and return success so the
+  // customer's order flow is never affected.
+  const fraudCheck = await checkSelfReferral(input.promoterId, input.orderId);
+  if (fraudCheck.flagged) {
+    return res.json({ success: true, flagged: true, flagType: fraudCheck.flagType, commission: null, agentCommission: null });
   }
 
   // 1. Attach the primary (KOL) commission.
@@ -141,7 +151,8 @@ export async function onOrderCompleted(req: Request, res: Response) {
   let count = 0;
 
   for (const c of commissions) {
-    // Transition: pending → cooling_down (with 7-day cool-down)
+    // Transition: pending → cooling_down (with 30-day cool-down per the
+    // published Commission Rules)
     if (c.status === "pending") {
       const result = await transition(c.id, "cooling_down", {
         service_completed_at: completedAt,
