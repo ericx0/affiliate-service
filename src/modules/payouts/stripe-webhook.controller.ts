@@ -11,8 +11,12 @@ export async function handleStripeWebhook(req: Request, res: Response) {
 
   let event: Stripe.Event;
   try {
+    // The webhook route is mounted with express.raw() (see src/index.ts),
+    // so the unparsed payload is in req.body as a Buffer. req.rawBody is
+    // only populated by the express.json() verify hook, which never runs
+    // for this route — reading it here silently broke every event.
     event = stripe.webhooks.constructEvent(
-      (req as any).rawBody,
+      req.body as Buffer,
       sig as string,
       env.STRIPE_WEBHOOK_SECRET
     );
