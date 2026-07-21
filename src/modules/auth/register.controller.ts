@@ -47,7 +47,7 @@ function extractClientIp(req: Request): string | null {
  * /api/affiliate/promoters endpoint, which is used by chinamed-admin).
  *
  * Security:
- *  - Requires a valid Supabase session JWT (via kolAuthMiddleware)
+ *  - Requires a valid Supabase session JWT (via kolJwtMiddleware)
  *  - Verifies the body's `email` matches the verified user's email
  *    to prevent an attacker from creating phantom promoter rows
  *    for arbitrary emails.

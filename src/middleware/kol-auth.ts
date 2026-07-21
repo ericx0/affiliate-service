@@ -40,31 +40,60 @@ declare global {
   namespace Express {
     interface Request {
       promoter?: Promoter;
-      /** Supabase auth user, available after kolAuthMiddleware runs. */
+      /** Supabase auth user, available after kolJwtMiddleware or kolAuthMiddleware runs. */
       kolUser?: { id: string; email: string };
     }
   }
 }
 
-export const kolAuthMiddleware: RequestHandler = async (req, res, next) => {
+/**
+ * Verify the Supabase session JWT and return the auth user, or write the
+ * 401 response and return null. Shared by both KOL middlewares below.
+ */
+async function verifyKolJwt(
+  req: Parameters<RequestHandler>[0],
+  res: Parameters<RequestHandler>[1],
+): Promise<{ id: string; email: string } | null> {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing or invalid Authorization header" } });
-    return;
+    return null;
   }
 
   const jwt = authHeader.slice(7).trim();
   if (!jwt) {
     res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Empty JWT" } });
-    return;
+    return null;
   }
 
   // Verify JWT via Supabase
   const { data: { user }, error: userErr } = await adminSupabase.auth.getUser(jwt);
   if (userErr || !user || !user.email) {
     res.status(401).json({ error: { code: "INVALID_TOKEN", message: "Invalid or expired JWT" } });
-    return;
+    return null;
   }
+
+  return { id: user.id, email: user.email };
+}
+
+/**
+ * JWT-only KOL middleware: verifies the Supabase session and attaches
+ * `req.kolUser`, WITHOUT requiring an existing promoter row.
+ *
+ * Used by /auth/register — a new KOL has no promoter row by definition,
+ * so requiring one there (the old behavior) made self-registration
+ * unreachable (403 NOT_A_KOL on every signup).
+ */
+export const kolJwtMiddleware: RequestHandler = async (req, res, next) => {
+  const user = await verifyKolJwt(req, res);
+  if (!user) return;
+  req.kolUser = user;
+  next();
+};
+
+export const kolAuthMiddleware: RequestHandler = async (req, res, next) => {
+  const user = await verifyKolJwt(req, res);
+  if (!user) return;
 
   // AS-P1-8 fix: look up promoter row by auth_user_id (stable) first,
   // fall back to email (legacy — pre-auth_user_id migrations). Once
