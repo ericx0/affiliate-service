@@ -3,6 +3,16 @@
 // threshold must be compared in the same unit.
 export const MINIMUM_PAYOUT_AMOUNT = 5000;
 
+// Approximate USD 50 equivalents per currency, per the published policy
+// "$50 (or equivalent)". Static approximations pending FX-driven
+// thresholds; unknown currencies conservatively require >= 5000 minor units.
+const MINIMUM_PAYOUT_BY_CURRENCY: Record<string, number> = {
+  USD: 5000,
+  EUR: 4600,
+  GBP: 4000,
+  JPY: 7500,
+};
+
 export interface CommissionForPayout {
   id: string;
   promoter_id: string;
@@ -49,7 +59,8 @@ export function groupCommissionsByPromoter(commissions: CommissionForPayout[]): 
 }
 
 export function exceedsMinimum(amount: number, currency: string): boolean {
-  // Only USD threshold defined for now; for other currencies, always payout
-  if (currency === "USD") return amount >= MINIMUM_PAYOUT_AMOUNT;
-  return true;
+  // "$50 or equivalent" per the published Commission Rules — previously
+  // only USD had a threshold and any non-USD balance paid out regardless
+  // of size, inviting fee-erosion micropayouts.
+  return amount >= (MINIMUM_PAYOUT_BY_CURRENCY[currency] ?? 5000);
 }

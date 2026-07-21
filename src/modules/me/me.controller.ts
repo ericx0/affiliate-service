@@ -259,6 +259,27 @@ export async function submitMyTaxForm(req: Request, res: Response) {
     res.status(403).json({ error: { code: "FORBIDDEN_PATH", message: "file_path must be in your own storage folder" } });
     return;
   }
+
+  // Verify the object actually exists in the private bucket. Without this,
+  // a KOL could register a phantom path and pass the IRS payout gate
+  // (payouts.service assertTaxFormSubmitted) with no real form on file.
+  const lastSlash = file_path.lastIndexOf("/");
+  const folder = file_path.slice(0, lastSlash);
+  const fileName = file_path.slice(lastSlash + 1);
+  const { data: objects, error: listErr } = await supabase.storage
+    .from("tax-forms")
+    .list(folder, { search: fileName });
+  if (listErr) {
+    internalError(res, "STORAGE_CHECK_FAILED", listErr);
+    return;
+  }
+  if (!(objects ?? []).some((o) => o.name === fileName)) {
+    res.status(400).json({
+      error: { code: "FILE_NOT_FOUND", message: "Tax form file not found in storage. Upload the signed PDF first." },
+    });
+    return;
+  }
+
   const { data, error } = await supabase
     .from("affiliate.tax_forms")
     .upsert(

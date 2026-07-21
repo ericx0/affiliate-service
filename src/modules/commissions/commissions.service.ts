@@ -10,7 +10,10 @@ import {
   VALID_TRANSITIONS,
 } from "./commissions.types.js";
 
-const COOL_DOWN_DAYS = 7;
+// Published Commission Rules promise a 30-day cooling-off period before
+// commission becomes payable (absorbs refund / chargeback risk). The code
+// previously used 7 days, contradicting the policy.
+const COOL_DOWN_DAYS = 30;
 
 export const AttachOrderSchema = z.object({
   orderId: z.string().uuid(),

@@ -181,8 +181,16 @@ describe("exceedsMinimum", () => {
     expect(exceedsMinimum(5000, "USD")).toBe(true);
     expect(exceedsMinimum(4999, "USD")).toBe(false);
   });
-  it("non-USD always passes (no threshold defined)", () => {
-    expect(exceedsMinimum(1, "EUR")).toBe(true);
+  it("non-USD uses approximate $50 equivalents (policy: $50 or equivalent)", () => {
+    expect(exceedsMinimum(4600, "EUR")).toBe(true);
+    expect(exceedsMinimum(4599, "EUR")).toBe(false);
+    expect(exceedsMinimum(4000, "GBP")).toBe(true);
+    expect(exceedsMinimum(7500, "JPY")).toBe(true);
+    expect(exceedsMinimum(1, "EUR")).toBe(false);
+  });
+  it("unknown currency conservatively requires 5000 minor units", () => {
+    expect(exceedsMinimum(5000, "CHF")).toBe(true);
+    expect(exceedsMinimum(4999, "CHF")).toBe(false);
   });
 });
 
