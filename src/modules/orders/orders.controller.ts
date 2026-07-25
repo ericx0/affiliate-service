@@ -76,12 +76,31 @@ export async function attach(req: Request, res: Response) {
     if (agent && agent.status === "active") {
       const agentType = agentCommissionType(input.commissionType);
       if (agentType) {
+        // Agent commission rate is DYNAMIC: auto-tier by the agent's current
+        // active recruited KOL count (5/8/10% via affiliate.compute_agent_tier),
+        // NOT the static commission_rate set at creation. Fall back to the
+        // stored rate only if the function is unavailable.
+        const { data: tierRows } = await supabase.rpc("compute_agent_tier", {
+          p_agent_id: agentId,
+        });
+        const tierRow = Array.isArray(tierRows) ? tierRows[0] : tierRows;
+        const agentRate =
+          tierRow && tierRow.rate != null
+            ? Number(tierRow.rate)
+            : agent.commission_rate;
+        if (!tierRow || tierRow.rate == null) {
+          logger.warn(
+            { agentId },
+            "compute_agent_tier returned no rate; falling back to stored commission_rate",
+          );
+        }
+
         const agentResult = await attachToOrder({
           promoterId: agentId,
           orderId: input.orderId,
           commissionType: agentType,
           orderAmount: input.orderAmount,
-          commissionRate: agent.commission_rate,
+          commissionRate: agentRate,
           currency: input.currency,
         });
         if (agentResult.success) {
