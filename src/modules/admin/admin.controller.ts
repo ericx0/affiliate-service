@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { z } from "zod";
-import { supabase, stripe } from "../../config.js";
+import { supabase, affiliateSupabase, stripe } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { paySingleCommission, payCommissions } from "../payouts/payouts.service.js";
 import { writeAuditLog } from "./audit.service.js";
@@ -48,8 +48,7 @@ export async function manualPayout(req: Request, res: Response) {
   const { commissionId, reason } = ManualPayoutSchema.parse(req.body);
   const ctx = adminCtx(req);
 
-  const { data: before } = await supabase
-    .from("commissions")
+  const { data: before } = await affiliateSupabase.from("commissions")
     .select("status, commission_amount, paid_at")
     .eq("id", commissionId)
     .single();
@@ -85,8 +84,7 @@ export async function triggerBatchPayout(req: Request, res: Response) {
   const { monthKey } = BatchPayoutSchema.parse(req.body);
   const ctx = adminCtx(req);
 
-  const { data: approved, error } = await supabase
-    .from("commissions")
+  const { data: approved, error } = await affiliateSupabase.from("commissions")
     .select("id")
     .eq("status", "approved");
 
@@ -325,8 +323,7 @@ export async function reverseCommission(req: Request, res: Response) {
   const ctx = adminCtx(req);
 
   // First check current state
-  const { data: current } = await supabase
-    .from("commissions")
+  const { data: current } = await affiliateSupabase.from("commissions")
     .select("status, commission_amount, stripe_transfer_id")
     .eq("id", id)
     .single();

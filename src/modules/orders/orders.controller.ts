@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { z } from "zod";
 import { logger } from "../../utils/logger.js";
-import { supabase } from "../../config.js";
+import { affiliateSupabase } from "../../config.js";
 import {
   attachToOrder,
   transition,
@@ -25,8 +25,7 @@ export async function attach(req: Request, res: Response) {
   const input = AttachSchema.parse(req.body);
 
   // Look up promoter (KOL) commission_rate + recruited_by_agent_id
-  const { data: promoter } = await supabase
-    .from("affiliate.promoters")
+  const { data: promoter } = await affiliateSupabase.from("promoters")
     .select("commission_rate, status, recruited_by_agent_id")
     .eq("id", input.promoterId)
     .single();
@@ -66,8 +65,7 @@ export async function attach(req: Request, res: Response) {
   let agentCommission: Commission | null = null;
   const agentId = promoter.recruited_by_agent_id;
   if (agentId) {
-    const { data: agent } = await supabase
-      .from("affiliate.promoters")
+    const { data: agent } = await affiliateSupabase.from("promoters")
       .select("commission_rate, status")
       .eq("id", agentId)
       .eq("role", "agent")
@@ -80,7 +78,7 @@ export async function attach(req: Request, res: Response) {
         // active recruited KOL count (5/8/10% via affiliate.compute_agent_tier),
         // NOT the static commission_rate set at creation. Fall back to the
         // stored rate only if the function is unavailable.
-        const { data: tierRows } = await supabase.rpc("compute_agent_tier", {
+        const { data: tierRows } = await affiliateSupabase.rpc("compute_agent_tier", {
           p_agent_id: agentId,
         });
         const tierRow = Array.isArray(tierRows) ? tierRows[0] : tierRows;
@@ -95,14 +93,26 @@ export async function attach(req: Request, res: Response) {
           );
         }
 
-        const agentResult = await attachToOrder({
-          promoterId: agentId,
-          orderId: input.orderId,
-          commissionType: agentType,
-          orderAmount: input.orderAmount,
-          commissionRate: agentRate,
-          currency: input.currency,
-        });
+        let agentResult: { success: boolean; commission?: Commission | null; error?: string };
+        try {
+          agentResult = await attachToOrder({
+            promoterId: agentId,
+            orderId: input.orderId,
+            commissionType: agentType,
+            orderAmount: input.orderAmount,
+            commissionRate: agentRate,
+            currency: input.currency,
+          });
+        } catch (e) {
+          // Express 4 does not auto-catch async rejections - without this
+          // try/catch a throw here hangs the whole request (KOL commission
+          // already attached, but the response never sends).
+          logger.error(
+            { orderId: input.orderId, agentId, error: (e as Error).message },
+            "agent override commission attach threw; KOL commission still attached",
+          );
+          agentResult = { success: false, error: (e as Error).message };
+        }
         if (agentResult.success) {
           agentCommission = agentResult.commission ?? null;
         } else {
@@ -135,8 +145,7 @@ const RefundEventSchema = z.object({
 });
 
 async function getCommissionsForOrder(orderId: string) {
-  const { data } = await supabase
-    .from("commissions")
+  const { data } = await affiliateSupabase.from("commissions")
     .select("*")
     .eq("order_id", orderId);
   return data || [];
@@ -151,8 +160,7 @@ export async function onOrderPaid(req: Request, res: Response) {
 
   for (const c of commissions) {
     // Update order_paid_at; may stay in pending if service not yet completed
-    await supabase
-      .from("commissions")
+    await affiliateSupabase.from("commissions")
       .update({ order_paid_at: paidAt, updated_at: new Date().toISOString() })
       .eq("id", c.id);
     count++;
@@ -189,7 +197,7 @@ export async function onOrderRefunded(req: Request, res: Response) {
 
   // 1. Idempotency: atomically claim the eventId. Conflict = already
   //    processed this event — return success without re-applying.
-  const { error: claimErr } = await supabase.from("affiliate.refund_events").insert({
+  const { error: claimErr } = await affiliateSupabase.from("refund_events").insert({
     event_id: eventId,
     order_id: orderId,
     refund_amount: refundAmount ?? null,
@@ -247,8 +255,7 @@ export async function onOrderRefunded(req: Request, res: Response) {
           { commissionId: c.id, eventId, error: rev.error },
           "Stripe reversal failed; rolling back refund_events claim and returning 500 for webhook retry",
         );
-        await supabase
-          .from("affiliate.refund_events")
+        await affiliateSupabase.from("refund_events")
           .delete()
           .eq("event_id", eventId);
         return internalError(
@@ -275,8 +282,7 @@ export async function onOrderRefunded(req: Request, res: Response) {
       if (result.success) count++;
     } else {
       // Partial refund: keep status, only adjust amounts (CAS: status match).
-      const { error: updErr } = await supabase
-        .from("commissions")
+      const { error: updErr } = await affiliateSupabase.from("commissions")
         .update({
           commission_amount: newCommissionAmount,
           cumulative_refunded_amount: newCumulative,
@@ -295,8 +301,7 @@ export async function onOrderRefunded(req: Request, res: Response) {
 export async function getOrderPromoter(req: Request, res: Response) {
   const { orderId } = req.params;
 
-  const { data: order } = await supabase
-    .from("commissions")
+  const { data: order } = await affiliateSupabase.from("commissions")
     .select("promoter_id, status, commission_amount")
     .eq("order_id", orderId)
     .limit(1)

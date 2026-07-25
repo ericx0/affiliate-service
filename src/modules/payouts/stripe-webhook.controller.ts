@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import Stripe from "stripe";
-import { stripe, supabase, env } from "../../config.js";
+import { stripe, supabase, affiliateSupabase, env } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 
 export async function handleStripeWebhook(req: Request, res: Response) {
@@ -58,8 +58,7 @@ export async function handleStripeWebhook(req: Request, res: Response) {
 
         if (event.type === "transfer.reversed") {
           // Mark commission as reversed
-          const { error: revErr } = await supabase
-            .from("affiliate.commissions")
+          const { error: revErr } = await affiliateSupabase.from("commissions")
             .update({
               status: "reversed",
               refunded_at: new Date().toISOString(),
@@ -76,8 +75,7 @@ export async function handleStripeWebhook(req: Request, res: Response) {
       case "account.updated": {
         const account = event.data.object as Stripe.Account;
         // Update promoter onboarding status
-        const { error: accErr } = await supabase
-          .from("affiliate.promoters")
+        const { error: accErr } = await affiliateSupabase.from("promoters")
           .update({
             stripe_onboarding_completed: account.details_submitted && account.charges_enabled,
             updated_at: new Date().toISOString(),
@@ -140,8 +138,7 @@ export async function handleStripeWebhook(req: Request, res: Response) {
       // attempting to use the disconnected account.
       case "account.application.deauthorized": {
         const account = event.data.object as Stripe.Application;
-        const { error: deauthErr } = await supabase
-          .from("affiliate.promoters")
+        const { error: deauthErr } = await affiliateSupabase.from("promoters")
           .update({
             status: "suspended",
             suspended_reason: "stripe_disconnected",

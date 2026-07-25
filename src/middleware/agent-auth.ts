@@ -1,6 +1,6 @@
 import { RequestHandler } from "express";
 import { createClient } from "@supabase/supabase-js";
-import { env, supabase } from "../config.js";
+import { env, affiliateSupabase } from "../config.js";
 import { internalError } from "../utils/controller-error.js";
 import { logger } from "../utils/logger.js";
 
@@ -55,8 +55,7 @@ export const agentAuthMiddleware: RequestHandler = async (req, res, next) => {
     return;
   }
 
-  const { data: agent, error: agentErr } = await supabase
-    .from("affiliate.promoters")
+  const { data: agent, error: agentErr } = await affiliateSupabase.from("promoters")
     .select("id, email, name, status, commission_rate, stripe_account_id, stripe_onboarding_completed")
     .eq("auth_user_id", user.id)
     .eq("role", "agent")

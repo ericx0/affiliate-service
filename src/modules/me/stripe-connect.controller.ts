@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { stripe, supabase, env } from "../../config.js";
+import { stripe, affiliateSupabase, env } from "../../config.js";
 
 /**
  * POST /me/stripe-connect
@@ -25,8 +25,7 @@ export async function postMyStripeConnect(req: Request, res: Response) {
   }
 
   // Read latest stripe_account_id (auth middleware doesn't include it)
-  const { data: p } = await supabase
-    .from("affiliate.promoters")
+  const { data: p } = await affiliateSupabase.from("promoters")
     .select("stripe_account_id, role, agent_level")
     .eq("id", promoter.id)
     .single();
@@ -48,8 +47,7 @@ export async function postMyStripeConnect(req: Request, res: Response) {
       env.STRIPE_SECRET_KEY === "sk_test_PLACEHOLDER");
   if (isDevMock) {
     const mockAccountId = existingAccountId || `acct_devmock_${promoter.id.slice(0, 8)}`;
-    await supabase
-      .from("affiliate.promoters")
+    await affiliateSupabase.from("promoters")
       .update({
         stripe_account_id: mockAccountId,
         stripe_onboarding_completed: false,
@@ -95,8 +93,7 @@ export async function postMyStripeConnect(req: Request, res: Response) {
       accountId = account.id;
 
       // Persist immediately so subsequent requests see the new id
-      await supabase
-        .from("affiliate.promoters")
+      await affiliateSupabase.from("promoters")
         .update({
           stripe_account_id: accountId,
           stripe_onboarding_completed: false,
@@ -145,8 +142,7 @@ export async function getMyStripeStatus(req: Request, res: Response) {
   }
 
   // Read latest values from DB (don't trust req.promoter cache)
-  const { data } = await supabase
-    .from("affiliate.promoters")
+  const { data } = await affiliateSupabase.from("promoters")
     .select("stripe_account_id, stripe_onboarding_completed")
     .eq("id", promoter.id)
     .single();

@@ -1,6 +1,6 @@
 import cron from "node-cron";
 import { logger } from "../utils/logger.js";
-import { supabase } from "../config.js";
+import { affiliateSupabase } from "../config.js";
 import { payCommissions } from "../modules/payouts/payouts.service.js";
 
 /**
@@ -17,8 +17,7 @@ export function startMonthlyPayoutJob() {
 
       try {
         // Get all approved commissions
-        const { data: approved, error } = await supabase
-          .from("commissions")
+        const { data: approved, error } = await affiliateSupabase.from("commissions")
           .select("id")
           .eq("status", "approved");
 

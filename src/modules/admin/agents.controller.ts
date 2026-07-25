@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { supabase } from "../../config.js";
+import { affiliateSupabase } from "../../config.js";
 import { internalError } from "../../utils/controller-error.js";
 import { logger } from "../../utils/logger.js";
 
@@ -59,8 +59,7 @@ export async function listAgents(_req: Request, res: Response) {
   // 1. Fetch all agents (id + profile fields only - aggregations are
   //    fetched separately to avoid the cartesian-product blow-up that
   //    comes from joining KOLs + commissions on the same query).
-  const { data: agents, error: agentsErr } = await supabase
-    .from("affiliate.promoters")
+  const { data: agents, error: agentsErr } = await affiliateSupabase.from("promoters")
     .select("id, name, email, status, agent_invite_code, created_at")
     .eq("role", "agent")
     .order("created_at", { ascending: false });
@@ -75,8 +74,7 @@ export async function listAgents(_req: Request, res: Response) {
   const agentIds = agentList.map((a) => a.id);
 
   // 2. KOLs recruited by these agents (id + status for count/active breakdown).
-  const { data: kols, error: kolsErr } = await supabase
-    .from("affiliate.promoters")
+  const { data: kols, error: kolsErr } = await affiliateSupabase.from("promoters")
     .select("id, recruited_by_agent_id, status")
     .eq("role", "kol")
     .in("recruited_by_agent_id", agentIds);
@@ -89,8 +87,7 @@ export async function listAgents(_req: Request, res: Response) {
   //    (service / subscription). This is the GMV the KOL generated.
   const gmvByKol = new Map<string, number>();
   if (kolIds.length > 0) {
-    const { data: kolComms, error: kolCommsErr } = await supabase
-      .from("affiliate.commissions")
+    const { data: kolComms, error: kolCommsErr } = await affiliateSupabase.from("commissions")
       .select("promoter_id, order_amount")
       .in("promoter_id", kolIds)
       .in("commission_type", ["service", "subscription"]);
@@ -106,8 +103,7 @@ export async function listAgents(_req: Request, res: Response) {
   // 4. Agent override commissions (agent_service / agent_subscription).
   //    Group by agent, split by paid vs pending.
   const commByAgent = new Map<string, { paid: number; pending: number }>();
-  const { data: agentComms, error: agentCommsErr } = await supabase
-    .from("affiliate.commissions")
+  const { data: agentComms, error: agentCommsErr } = await affiliateSupabase.from("commissions")
     .select("promoter_id, status, commission_amount")
     .in("promoter_id", agentIds)
     .in("commission_type", ["agent_service", "agent_subscription"]);
@@ -172,8 +168,7 @@ export async function listAgentKols(req: Request, res: Response) {
   const { agentId } = req.params;
 
   // 1. Verify the agent exists
-  const { data: agent, error: agentErr } = await supabase
-    .from("affiliate.promoters")
+  const { data: agent, error: agentErr } = await affiliateSupabase.from("promoters")
     .select("id, name")
     .eq("id", agentId)
     .eq("role", "agent")
@@ -185,8 +180,7 @@ export async function listAgentKols(req: Request, res: Response) {
   }
 
   // 2. Fetch KOLs recruited by this agent
-  const { data: kols, error: kolsErr } = await supabase
-    .from("affiliate.promoters")
+  const { data: kols, error: kolsErr } = await affiliateSupabase.from("promoters")
     .select("id, name, email, status, created_at")
     .eq("recruited_by_agent_id", agentId)
     .eq("role", "kol")
@@ -201,8 +195,7 @@ export async function listAgentKols(req: Request, res: Response) {
 
   if (kolIds.length > 0) {
     // 3a. Referral codes (one active code per KOL)
-    const { data: codes, error: codesErr } = await supabase
-      .from("affiliate.referral_codes")
+    const { data: codes, error: codesErr } = await affiliateSupabase.from("referral_codes")
       .select("promoter_id, code")
       .in("promoter_id", kolIds)
       .eq("is_active", true);
@@ -220,8 +213,7 @@ export async function listAgentKols(req: Request, res: Response) {
     }
 
     // 3b. Commissions (KOL's own, type service/subscription)
-    const { data: comms, error: commsErr } = await supabase
-      .from("affiliate.commissions")
+    const { data: comms, error: commsErr } = await affiliateSupabase.from("commissions")
       .select("promoter_id, status, commission_amount, order_amount")
       .in("promoter_id", kolIds)
       .in("commission_type", ["service", "subscription"]);

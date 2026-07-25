@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { stripe, supabase } from "../../config.js";
+import { stripe, supabase, affiliateSupabase } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { transition } from "../commissions/commissions.service.js";
 import { groupCommissionsByPromoter, exceedsMinimum } from "./payouts.helpers.js";
@@ -19,8 +19,7 @@ export interface PayoutResult {
  * { ok: false, reason } if not; the caller returns it as the payout error.
  */
 async function assertTaxFormSubmitted(promoterId: string): Promise<{ ok: boolean; reason?: string }> {
-  const { data, error } = await supabase
-    .from("affiliate.tax_forms")
+  const { data, error } = await affiliateSupabase.from("tax_forms")
     .select("status")
     .eq("promoter_id", promoterId)
     .maybeSingle();
@@ -40,8 +39,7 @@ async function assertTaxFormSubmitted(promoterId: string): Promise<{ ok: boolean
  */
 export async function paySingleCommission(commissionId: string): Promise<PayoutResult> {
   // Fetch commission + promoter stripe_account_id
-  const { data: commission, error } = await supabase
-    .from("commissions")
+  const { data: commission, error } = await affiliateSupabase.from("commissions")
     .select("*, promoters(stripe_account_id, stripe_onboarding_completed)")
     .eq("id", commissionId)
     .single();
@@ -227,8 +225,7 @@ export async function payPromoterGroup(
  * Skips groups below minimum threshold (carries over to next month).
  */
 export async function payCommissions(commissionIds: string[]): Promise<PayoutResult[]> {
-  const { data: commissions, error } = await supabase
-    .from("commissions")
+  const { data: commissions, error } = await affiliateSupabase.from("commissions")
     .select("*, promoters(stripe_account_id, stripe_onboarding_completed)")
     .in("id", commissionIds)
     .eq("status", "approved");

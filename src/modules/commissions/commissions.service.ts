@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { supabase, stripe } from "../../config.js";
+import { affiliateSupabase, stripe } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import {
   Commission,
@@ -18,7 +18,7 @@ const COOL_DOWN_DAYS = 30;
 export const AttachOrderSchema = z.object({
   orderId: z.string().uuid(),
   promoterId: z.string().uuid(),
-  commissionType: z.enum(["service", "subscription"]),
+  commissionType: z.enum(["service", "subscription", "agent_service", "agent_subscription"]),
   orderAmount: z.number().positive(),
   commissionRate: z.number().min(0).max(50),
   currency: z.string().default("USD"),
@@ -44,8 +44,7 @@ export async function attachToOrder(input: CreateCommissionInput): Promise<Trans
   const validated = AttachOrderSchema.parse(input);
 
   // Check for existing commission
-  const { data: existing } = await supabase
-    .from("commissions")
+  const { data: existing } = await affiliateSupabase.from("commissions")
     .select("*")
     .eq("order_id", validated.orderId)
     .eq("commission_type", validated.commissionType)
@@ -61,8 +60,7 @@ export async function attachToOrder(input: CreateCommissionInput): Promise<Trans
     (validated.orderAmount * validated.commissionRate) / 100,
   );
 
-  const { data, error } = await supabase
-    .from("commissions")
+  const { data, error } = await affiliateSupabase.from("commissions")
     .insert({
       promoter_id: validated.promoterId,
       order_id: validated.orderId,
@@ -81,8 +79,7 @@ export async function attachToOrder(input: CreateCommissionInput): Promise<Trans
     // UNIQUE(order_id, commission_type) constraint. Treat as idempotent:
     // fetch and return the row the other request created.
     if (error.code === "23505") {
-      const { data: raced } = await supabase
-        .from("commissions")
+      const { data: raced } = await affiliateSupabase.from("commissions")
         .select("*")
         .eq("order_id", validated.orderId)
         .eq("commission_type", validated.commissionType)
@@ -138,8 +135,7 @@ export async function transition(
   if (toStatus === "refunded") updates.refunded_at = now;
   if (toStatus === "reversed") updates.refunded_at = now;  // reuse field for reverse
 
-  const { data, error } = await supabase
-    .from("commissions")
+  const { data, error } = await affiliateSupabase.from("commissions")
     .update(updates)
     .eq("id", commissionId)
     .in("status", validSources)
@@ -150,8 +146,7 @@ export async function transition(
     // Either the row doesn't exist or its current status isn't in
     // validSources (already moved by a concurrent caller). Distinguish so
     // the caller can decide whether to retry.
-    const { data: existing } = await supabase
-      .from("commissions")
+    const { data: existing } = await affiliateSupabase.from("commissions")
       .select("status")
       .eq("id", commissionId)
       .maybeSingle();
@@ -177,8 +172,7 @@ export async function transition(
  * Called by daily cron job.
  */
 export async function approveExpiredCooldowns(): Promise<number> {
-  const { data: expired, error } = await supabase
-    .from("commissions")
+  const { data: expired, error } = await affiliateSupabase.from("commissions")
     .select("id")
     .eq("status", "cooling_down")
     .lte("cool_down_until", new Date().toISOString())
@@ -215,8 +209,7 @@ export async function reversePaidCommission(
   reason: string,
   eventId: string,
 ): Promise<TransitionResult> {
-  const { data: commission, error } = await supabase
-    .from("commissions")
+  const { data: commission, error } = await affiliateSupabase.from("commissions")
     .select("*")
     .eq("id", commissionId)
     .single();

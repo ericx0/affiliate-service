@@ -4,7 +4,7 @@ import { logger } from "../../utils/logger.js";
 import { approveExpiredCooldowns } from "../commissions/commissions.service.js";
 import { payCommissions } from "../payouts/payouts.service.js";
 import { scanRecentCommissions } from "../fraud/fraud.service.js";
-import { supabase } from "../../config.js";
+import { affiliateSupabase } from "../../config.js";
 import { internalError } from "../../utils/controller-error.js";
 
 const cronRouter = Router();
@@ -51,8 +51,7 @@ cronRouter.get("/approve-cooldown", async (_req, res) => {
 
 cronRouter.get("/monthly-payout", async (_req, res) => {
   try {
-    const { data: approved, error } = await supabase
-      .from("commissions")
+    const { data: approved, error } = await affiliateSupabase.from("commissions")
       .select("id")
       .eq("status", "approved");
 

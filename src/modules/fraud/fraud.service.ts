@@ -1,4 +1,4 @@
-import { supabase } from "../../config.js";
+import { supabase, affiliateSupabase } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 
 /**
@@ -53,7 +53,7 @@ async function insertFlag(flag: {
   flag_type: FraudFlagType;
   details?: Record<string, unknown>;
 }): Promise<void> {
-  const { error } = await supabase.from("affiliate.fraud_flags").insert({
+  const { error } = await affiliateSupabase.from("fraud_flags").insert({
     promoter_id: flag.promoter_id,
     commission_id: flag.commission_id ?? null,
     order_id: flag.order_id ?? null,
@@ -89,8 +89,7 @@ export async function checkSelfReferral(
   const customerPhone = normalizePhone(userInfo.phone);
   if (!customerEmail && !customerPhone) return { flagged: false };
 
-  const { data: promoter } = await supabase
-    .from("affiliate.promoters")
+  const { data: promoter } = await affiliateSupabase.from("promoters")
     .select("email, phone")
     .eq("id", promoterId)
     .maybeSingle();
@@ -125,8 +124,7 @@ export async function checkSelfReferral(
 /** Commission ids that currently have an OPEN fraud flag. */
 export async function getOpenFlaggedCommissionIds(commissionIds: string[]): Promise<Set<string>> {
   if (commissionIds.length === 0) return new Set();
-  const { data, error } = await supabase
-    .from("affiliate.fraud_flags")
+  const { data, error } = await affiliateSupabase.from("fraud_flags")
     .select("commission_id")
     .in("commission_id", commissionIds)
     .eq("status", "open");
@@ -152,8 +150,7 @@ interface ScanCommissionRow {
  */
 export async function scanRecentCommissions(daysBack = 90): Promise<number> {
   const since = new Date(Date.now() - daysBack * 24 * 3600 * 1000).toISOString();
-  const { data: commissions, error } = await supabase
-    .from("commissions")
+  const { data: commissions, error } = await affiliateSupabase.from("commissions")
     .select("id, promoter_id, order_id")
     .in("status", ["pending", "cooling_down", "approved"])
     .gte("created_at", since)
@@ -166,8 +163,7 @@ export async function scanRecentCommissions(daysBack = 90): Promise<number> {
 
   for (const c of (commissions ?? []) as ScanCommissionRow[]) {
     // Skip commissions that already have an open flag (dedupe cheaply).
-    const { data: existing } = await supabase
-      .from("affiliate.fraud_flags")
+    const { data: existing } = await affiliateSupabase.from("fraud_flags")
       .select("id")
       .eq("commission_id", c.id)
       .eq("status", "open")
@@ -186,8 +182,7 @@ export async function scanRecentCommissions(daysBack = 90): Promise<number> {
     const customerPhone = normalizePhone(userInfo.phone);
     const orderIp = typeof orderRow.submission_ip === "string" ? orderRow.submission_ip : null;
 
-    const { data: promoter } = await supabase
-      .from("affiliate.promoters")
+    const { data: promoter } = await affiliateSupabase.from("promoters")
       .select("email, phone")
       .eq("id", c.promoter_id)
       .maybeSingle();

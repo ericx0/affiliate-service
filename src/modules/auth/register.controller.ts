@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { z } from "zod";
-import { supabase } from "../../config.js";
+import { supabase, affiliateSupabase } from "../../config.js";
 import { internalError } from "../../utils/controller-error.js";
 import { logger } from "../../utils/logger.js";
 
@@ -157,8 +157,7 @@ export async function selfRegister(req: Request, res: Response) {
   const agentInviteCode = body.agent_invite_code || queryAgent;
 
   if (agentInviteCode) {
-    const { data: agentRow, error: agentLookupErr } = await supabase
-      .from("affiliate.promoters")
+    const { data: agentRow, error: agentLookupErr } = await affiliateSupabase.from("promoters")
       .select("id")
       .eq("agent_invite_code", agentInviteCode.toUpperCase())
       .eq("role", "agent")
@@ -177,8 +176,7 @@ export async function selfRegister(req: Request, res: Response) {
   // Keep the existing 400-on-invalid behavior so user-typed invalid codes
   // surface a correction prompt rather than silently unbinding.
   if (!recruitedByAgentId && body.referralCode) {
-    const { data: codeRow, error: codeErr } = await supabase
-      .from("affiliate.referral_codes")
+    const { data: codeRow, error: codeErr } = await affiliateSupabase.from("referral_codes")
       .select("promoter_id, promoters!inner(id, role, status)")
       .eq("code", body.referralCode.toUpperCase())
       .eq("is_active", true)

@@ -1,7 +1,7 @@
 import { RequestHandler } from "express";
 import { createClient } from "@supabase/supabase-js";
 import { env } from "../config.js";
-import { supabase } from "../config.js";
+import { supabase, affiliateSupabase } from "../config.js";
 import { internalError } from "../utils/controller-error.js";
 import { logger } from "../utils/logger.js";
 
@@ -100,8 +100,7 @@ export const kolAuthMiddleware: RequestHandler = async (req, res, next) => {
   // the backfill has run (20260714000032) every active promoter has
   // a populated auth_user_id and the email fallback is only used for
   // any pre-backfill orphan rows.
-  const { data: promoterByAuthId } = await supabase
-    .from("affiliate.promoters")
+  const { data: promoterByAuthId } = await affiliateSupabase.from("promoters")
     .select("*")
     .eq("auth_user_id", user.id)
     .maybeSingle();

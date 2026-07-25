@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { z } from "zod";
 import crypto from "node:crypto";
-import { supabase } from "../../config.js";
+import { supabase, affiliateSupabase } from "../../config.js";
 import { internalError } from "../../utils/controller-error.js";
 
 /**
@@ -145,8 +145,7 @@ export async function updateMe(req: Request, res: Response) {
     return;
   }
 
-  const { data, error } = await supabase
-    .from("affiliate.promoters")
+  const { data, error } = await affiliateSupabase.from("promoters")
     .update(updates)
     .eq("id", promoterId)
     .select("id, name, email, country_code, primary_platform, primary_platform_url")
@@ -182,8 +181,7 @@ export async function createMyCode(req: Request, res: Response) {
     return;
   }
 
-  const { count, error: countErr } = await supabase
-    .from("affiliate.referral_codes")
+  const { count, error: countErr } = await affiliateSupabase.from("referral_codes")
     .select("id", { count: "exact", head: true })
     .eq("promoter_id", promoterId)
     .eq("is_active", true);
@@ -200,8 +198,7 @@ export async function createMyCode(req: Request, res: Response) {
 
   for (let attempt = 0; attempt < 10; attempt++) {
     const code = crypto.randomBytes(4).toString("hex").toUpperCase();
-    const { data, error } = await supabase
-      .from("affiliate.referral_codes")
+    const { data, error } = await affiliateSupabase.from("referral_codes")
       .insert({ promoter_id: promoterId, code })
       .select("id, code, is_active, created_at")
       .single();
@@ -280,8 +277,7 @@ export async function submitMyTaxForm(req: Request, res: Response) {
     return;
   }
 
-  const { data, error } = await supabase
-    .from("affiliate.tax_forms")
+  const { data, error } = await affiliateSupabase.from("tax_forms")
     .upsert(
       {
         promoter_id: promoterId,
@@ -312,8 +308,7 @@ export async function getMyTaxForm(req: Request, res: Response) {
     res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing promoter context" } });
     return;
   }
-  const { data, error } = await supabase
-    .from("affiliate.tax_forms")
+  const { data, error } = await affiliateSupabase.from("tax_forms")
     .select("id, form_type, signer_name, status, submitted_at, updated_at")
     .eq("promoter_id", promoterId)
     .maybeSingle();

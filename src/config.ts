@@ -31,6 +31,17 @@ export const supabase: SupabaseClient = createClient(env.SUPABASE_URL, env.SUPAB
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
+// affiliate-schema client. The main `supabase` client defaults to the
+// public schema (needed for RPC affiliate_* functions in public + public
+// tables like profiles/orders). PostgREST does NOT resolve schema-qualified
+// names like "affiliate.promoters" (it treats the dot as part of the table
+// name -> 404), so direct reads/writes of affiliate.* tables MUST go
+// through this client (db.schema sets the Accept-Profile header).
+export const affiliateSupabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+  db: { schema: "affiliate" },
+});
+
 import Stripe from "stripe";
 export const stripe = new Stripe(env.STRIPE_SECRET_KEY, {
   apiVersion: "2024-06-20",

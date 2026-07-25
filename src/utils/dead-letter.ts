@@ -1,4 +1,4 @@
-import { supabase } from "../config.js";
+import { affiliateSupabase } from "../config.js";
 import { logger } from "./logger.js";
 
 const MAX_RETRIES = 3;
@@ -14,8 +14,7 @@ export interface DeadLetterInput {
  * Record a failed event in dead-letter queue for later retry.
  */
 export async function recordFailedEvent(input: DeadLetterInput): Promise<void> {
-  const { error } = await supabase
-    .from("failed_events")
+  const { error } = await affiliateSupabase.from("failed_events")
     .insert({
       event_type: input.eventType,
       payload: input.payload as any,
@@ -39,8 +38,7 @@ export async function retryDeadLetterEvent(
   eventId: string,
   handler: (payload: any) => Promise<void>
 ): Promise<{ success: boolean; status: string }> {
-  const { data: event, error } = await supabase
-    .from("failed_events")
+  const { data: event, error } = await affiliateSupabase.from("failed_events")
     .select("*")
     .eq("id", eventId)
     .single();
@@ -53,8 +51,7 @@ export async function retryDeadLetterEvent(
   try {
     await handler(event.payload);
 
-    await supabase
-      .from("failed_events")
+    await affiliateSupabase.from("failed_events")
       .update({ status: "resolved", resolved_at: new Date().toISOString() })
       .eq("id", eventId);
 
@@ -64,8 +61,7 @@ export async function retryDeadLetterEvent(
     const newRetryCount = event.retry_count + 1;
 
     if (newRetryCount >= MAX_RETRIES) {
-      await supabase
-        .from("failed_events")
+      await affiliateSupabase.from("failed_events")
         .update({ status: "ignored", retry_count: newRetryCount })
         .eq("id", eventId);
 
@@ -74,8 +70,7 @@ export async function retryDeadLetterEvent(
     }
 
     const nextDelayMin = RETRY_DELAYS_MIN[newRetryCount];
-    await supabase
-      .from("failed_events")
+    await affiliateSupabase.from("failed_events")
       .update({
         status: "retrying",
         retry_count: newRetryCount,
@@ -93,8 +88,7 @@ export async function retryDeadLetterEvent(
  * Cron job: process pending and due-to-retry events every 5 minutes.
  */
 export async function processDeadLetterQueue(): Promise<number> {
-  const { data: events, error } = await supabase
-    .from("failed_events")
+  const { data: events, error } = await affiliateSupabase.from("failed_events")
     .select("id, event_type, payload")
     .or("status.eq.pending,status.eq.retrying")
     .lte("next_retry_at", new Date().toISOString())

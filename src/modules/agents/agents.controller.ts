@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { z } from "zod";
-import { supabase, env } from "../../config.js";
+import { supabase, affiliateSupabase, env } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { internalError } from "../../utils/controller-error.js";
 
@@ -110,8 +110,7 @@ export async function listKols(req: Request, res: Response) {
   }
   const { limit, offset } = parsePaging(req);
 
-  const { data: kols, error, count } = await supabase
-    .from("affiliate.promoters")
+  const { data: kols, error, count } = await affiliateSupabase.from("promoters")
     .select(
       "id, name, email, status, commission_rate, primary_platform, created_at, total_commission_earned, total_commission_paid",
       { count: "exact" },
@@ -132,8 +131,7 @@ export async function listKols(req: Request, res: Response) {
   // service/subscription commissions. Mirrors admin listAgentKols.
   const gmvByKol = new Map<string, number>();
   if (kolIds.length > 0) {
-    const { data: comms, error: commsErr } = await supabase
-      .from("affiliate.commissions")
+    const { data: comms, error: commsErr } = await affiliateSupabase.from("commissions")
       .select("promoter_id, order_amount")
       .in("promoter_id", kolIds)
       .in("commission_type", ["service", "subscription"]);
@@ -164,8 +162,7 @@ export async function getKol(req: Request, res: Response) {
     res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing agent context" } });
     return;
   }
-  const { data, error } = await supabase
-    .from("affiliate.promoters")
+  const { data, error } = await affiliateSupabase.from("promoters")
     .select("*")
     .eq("id", req.params.id)
     .eq("role", "kol")
@@ -191,8 +188,7 @@ export async function getMyCommissions(req: Request, res: Response) {
   }
   const { limit, offset } = parsePaging(req);
 
-  const { data, error, count } = await supabase
-    .from("affiliate.commissions")
+  const { data, error, count } = await affiliateSupabase.from("commissions")
     .select(
       "id, order_id, commission_type, order_amount, commission_rate, commission_amount, currency, status, created_at, paid_at",
       { count: "exact" },
@@ -226,8 +222,7 @@ export async function getMyInviteCode(req: Request, res: Response) {
     return;
   }
 
-  const { data, error } = await supabase
-    .from("affiliate.promoters")
+  const { data, error } = await affiliateSupabase.from("promoters")
     .select("agent_invite_code")
     .eq("id", agent.id)
     .eq("role", "agent")
@@ -259,20 +254,17 @@ export async function getMyStats(req: Request, res: Response) {
     return;
   }
 
-  const { count: totalKols } = await supabase
-    .from("affiliate.promoters")
+  const { count: totalKols } = await affiliateSupabase.from("promoters")
     .select("id", { count: "exact", head: true })
     .eq("recruited_by_agent_id", agentId)
     .eq("role", "kol");
-  const { count: activeKols } = await supabase
-    .from("affiliate.promoters")
+  const { count: activeKols } = await affiliateSupabase.from("promoters")
     .select("id", { count: "exact", head: true })
     .eq("recruited_by_agent_id", agentId)
     .eq("role", "kol")
     .eq("status", "active");
 
-  const { data: totals, error: totalsErr } = await supabase
-    .from("affiliate.commissions")
+  const { data: totals, error: totalsErr } = await affiliateSupabase.from("commissions")
     .select("status, commission_amount")
     .eq("promoter_id", agentId)
     .in("commission_type", ["agent_service", "agent_subscription"]);
@@ -304,8 +296,7 @@ export async function getKolCommissions(req: Request, res: Response) {
     res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing agent context" } });
     return;
   }
-  const { data: kol } = await supabase
-    .from("affiliate.promoters")
+  const { data: kol } = await affiliateSupabase.from("promoters")
     .select("id")
     .eq("id", req.params.id)
     .eq("role", "kol")
@@ -316,8 +307,7 @@ export async function getKolCommissions(req: Request, res: Response) {
     return;
   }
   const { limit, offset } = parsePaging(req);
-  const { data, error, count } = await supabase
-    .from("affiliate.commissions")
+  const { data, error, count } = await affiliateSupabase.from("commissions")
     .select(
       "id, order_id, commission_type, order_amount, commission_rate, commission_amount, currency, status, created_at, paid_at",
       { count: "exact" },
@@ -342,8 +332,7 @@ export async function suspendKol(req: Request, res: Response) {
     return;
   }
   const reason = (req.body?.reason as string) || "Suspended by agent";
-  const { data, error } = await supabase
-    .from("affiliate.promoters")
+  const { data, error } = await affiliateSupabase.from("promoters")
     .update({
       status: "suspended",
       suspended_reason: reason,
@@ -373,8 +362,7 @@ export async function activateKol(req: Request, res: Response) {
     res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing agent context" } });
     return;
   }
-  const { data, error } = await supabase
-    .from("affiliate.promoters")
+  const { data, error } = await affiliateSupabase.from("promoters")
     .update({
       status: "active",
       suspended_reason: null,
@@ -428,8 +416,7 @@ export async function updateKol(req: Request, res: Response) {
   for (const [k, v] of Object.entries(input)) {
     if (v !== undefined) updates[k] = v;
   }
-  const { data, error } = await supabase
-    .from("affiliate.promoters")
+  const { data, error } = await affiliateSupabase.from("promoters")
     .update(updates)
     .eq("id", req.params.id)
     .eq("role", "kol")

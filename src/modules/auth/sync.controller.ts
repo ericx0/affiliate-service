@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { z } from "zod";
-import { supabase } from "../../config.js";
+import { affiliateSupabase } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 
 const SyncSchema = z.object({
@@ -90,8 +90,7 @@ export async function syncKOLProfile(req: Request, res: Response) {
     return;
   }
 
-  const { error } = await supabase
-    .from("affiliate.promoters")
+  const { error } = await affiliateSupabase.from("promoters")
     .update(updates)
     .eq("auth_user_id", user.id);
 

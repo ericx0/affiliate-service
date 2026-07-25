@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { z } from "zod";
-import { supabase } from "../../config.js";
+import { affiliateSupabase } from "../../config.js";
 import { transition } from "../commissions/commissions.service.js";
 import { internalError } from "../../utils/controller-error.js";
 import { logger } from "../../utils/logger.js";
@@ -26,8 +26,7 @@ const ResolveSchema = z.object({
 
 export async function listFraudFlags(req: Request, res: Response) {
   const status = typeof req.query.status === "string" ? req.query.status : "open";
-  let query = supabase
-    .from("affiliate.fraud_flags")
+  let query = affiliateSupabase.from("fraud_flags")
     .select("*")
     .order("created_at", { ascending: false })
     .limit(200);
@@ -45,8 +44,7 @@ export async function resolveFraudFlag(req: Request, res: Response) {
   }
   const adminEmail = req.adminUser?.email ?? "unknown";
 
-  const { data: flag, error: flagErr } = await supabase
-    .from("affiliate.fraud_flags")
+  const { data: flag, error: flagErr } = await affiliateSupabase.from("fraud_flags")
     .select("*")
     .eq("id", req.params.id)
     .single();
@@ -74,8 +72,7 @@ export async function resolveFraudFlag(req: Request, res: Response) {
     }
   }
 
-  const { error: updErr } = await supabase
-    .from("affiliate.fraud_flags")
+  const { error: updErr } = await affiliateSupabase.from("fraud_flags")
     .update({
       status: parsed.data.action === "confirm" ? "confirmed_fraud" : "dismissed",
       resolution_note: parsed.data.note ?? null,
