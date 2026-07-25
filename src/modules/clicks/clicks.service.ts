@@ -1,9 +1,9 @@
 import { z } from "zod";
-import { supabase } from "../../config.js";
+import { affiliateSupabase, env } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { isValidCodeFormat } from "../../utils/code-generator.js";
 
-export const ATTRIBUTION_WINDOW_DAYS = 30;
+export const ATTRIBUTION_WINDOW_DAYS = env.ATTRIBUTION_WINDOW_DAYS;
 
 const TrackClickSchema = z.object({
   referralCode: z.string().min(4).max(32),
@@ -49,7 +49,7 @@ export async function trackClick(input: TrackClickInput): Promise<TrackClickResu
   }
 
   // Look up promoter via code
-  const { data: codeRow, error: codeErr } = await supabase
+  const { data: codeRow, error: codeErr } = await affiliateSupabase
     .from("referral_codes")
     .select("promoter_id, is_active, expires_at")
     .eq("code", validated.referralCode)
@@ -66,7 +66,7 @@ export async function trackClick(input: TrackClickInput): Promise<TrackClickResu
   }
 
   // Idempotency: check if this session+code already recorded recently
-  const { data: existing } = await supabase
+  const { data: existing } = await affiliateSupabase
     .from("referral_clicks")
     .select("id")
     .eq("visitor_session_id", validated.visitorSessionId)
@@ -82,7 +82,7 @@ export async function trackClick(input: TrackClickInput): Promise<TrackClickResu
   const windowEnd = new Date(now);
   windowEnd.setDate(windowEnd.getDate() + ATTRIBUTION_WINDOW_DAYS);
 
-  const { data: click, error: insertErr } = await supabase
+  const { data: click, error: insertErr } = await affiliateSupabase
     .from("referral_clicks")
     .insert({
       referral_code: validated.referralCode,
@@ -114,7 +114,7 @@ export async function findActiveClickForSession(visitorSessionId: string): Promi
   promoterId: string;
   referralCode: string;
 } | null> {
-  const { data, error } = await supabase
+  const { data, error } = await affiliateSupabase
     .from("referral_clicks")
     .select("promoter_id, referral_code, attribution_window_ends_at")
     .eq("visitor_session_id", visitorSessionId)
@@ -140,7 +140,7 @@ export async function markClickConverted(
   conversionId: string
 ): Promise<void> {
   const updateField = conversionType === "user" ? "converted_user_id" : "converted_order_id";
-  await supabase
+  await affiliateSupabase
     .from("referral_clicks")
     .update({
       [updateField]: conversionId,

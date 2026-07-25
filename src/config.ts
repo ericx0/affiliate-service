@@ -24,6 +24,9 @@ const EnvSchema = z.object({
   ADMIN_NOTIFY_EMAIL: z.string().email().optional(),
   MAIL_FROM: z.string().optional(),
 
+  // Attribution window (days) for referral clicks. Default 30.
+  ATTRIBUTION_WINDOW_DAYS: z.coerce.number().int().positive().default(30),
+
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
 });
 
