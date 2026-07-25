@@ -18,6 +18,12 @@ const EnvSchema = z.object({
 
   LCM_AFFILIATE_SECRET: z.string().min(32, "HMAC secret must be at least 32 chars"),
 
+  // Email notifications via Resend (optional - notifications silently skip
+  // if RESEND_API_KEY is unset, so the service still starts without them).
+  RESEND_API_KEY: z.string().optional(),
+  ADMIN_NOTIFY_EMAIL: z.string().email().optional(),
+  MAIL_FROM: z.string().optional(),
+
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
 });
 

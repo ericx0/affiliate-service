@@ -3,6 +3,7 @@ import { z } from "zod";
 import { supabase, affiliateSupabase } from "../../config.js";
 import { internalError } from "../../utils/controller-error.js";
 import { logger } from "../../utils/logger.js";
+import { notifyAdminNewKol } from "../notifications/notifications.service.js";
 
 const SelfRegisterSchema = z.object({
   authUserId: z.string().uuid("Invalid authUserId"),
@@ -251,6 +252,22 @@ export async function selfRegister(req: Request, res: Response) {
     }
   } else {
     logger.warn({ email: body.email }, "promoter_id missing from RPC response; NDA consent not recorded");
+  }
+
+  // Notify admin of the new KOL registration (best-effort - don't block).
+  if (promoterId) {
+    const { data: codeRow } = await affiliateSupabase
+      .from("referral_codes")
+      .select("code")
+      .eq("promoter_id", promoterId)
+      .maybeSingle();
+    notifyAdminNewKol({
+      name: body.name,
+      email: body.email,
+      code: codeRow?.code || "",
+    }).catch((e) =>
+      logger.error({ error: (e as Error).message }, "notifyAdminNewKol failed"),
+    );
   }
 
   res.status(201).json(data);

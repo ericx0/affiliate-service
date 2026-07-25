@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import Stripe from "stripe";
 import { stripe, supabase, affiliateSupabase, env } from "../../config.js";
 import { logger } from "../../utils/logger.js";
+import { notifyAdminDispute, notifyAdminPayoutFailure } from "../notifications/notifications.service.js";
 
 export async function handleStripeWebhook(req: Request, res: Response) {
   const sig = req.headers["stripe-signature"];
@@ -107,8 +108,11 @@ export async function handleStripeWebhook(req: Request, res: Response) {
           },
           "Stripe charge.dispute.created - investigate and decide commission clawback",
         );
-        // TODO: write to admin_alerts table + send Slack/email.
-        // Deferred; for now we log loudly so it appears in alerts.
+        // Alert operations (best-effort email; also logged above).
+        await notifyAdminDispute({
+          commissionId: chargeId || dispute.id,
+          reason: dispute.reason || "unknown",
+        });
         break;
       }
 
@@ -129,7 +133,10 @@ export async function handleStripeWebhook(req: Request, res: Response) {
           },
           "Stripe payout.failed - KOL did not receive funds",
         );
-        // TODO: write to admin_alerts + Slack.
+        await notifyAdminPayoutFailure({
+          promoterId: String(payout.destination || payout.id),
+          error: payout.failure_message || payout.failure_code || "unknown",
+        });
         break;
       }
 

@@ -2,6 +2,7 @@ import cron from "node-cron";
 import { logger } from "../utils/logger.js";
 import { affiliateSupabase } from "../config.js";
 import { payCommissions } from "../modules/payouts/payouts.service.js";
+import { notifyAdminPayoutFailure } from "../modules/notifications/notifications.service.js";
 
 /**
  * Monthly batch payout job.
@@ -53,7 +54,10 @@ export function startMonthlyPayoutJob() {
             { failed, results: results.filter((r) => !r.success) },
             "monthly payout had failures"
           );
-          // TODO: send email to admin
+          await notifyAdminPayoutFailure({
+            promoterId: "monthly-batch",
+            error: `${failed} of ${results.length} payouts failed`,
+          });
         }
       } catch (err) {
         logger.error({ err }, "monthly payout batch failed");
