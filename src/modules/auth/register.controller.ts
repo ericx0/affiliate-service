@@ -114,10 +114,13 @@ export async function selfRegister(req: Request, res: Response) {
     return;
   }
 
-  // Resolve the active NDA template for the clickwrap consent record
-  // (ESIGN Act: the signature must be tied to a specific document
-  // version via content_hash). Fail-fast BEFORE creating the promoter
-  // so a missing template doesn't leave a promoter without a recorded NDA.
+  // Resolve the active NDA + Affiliate Agreement templates for the clickwrap
+  // consent record (ESIGN Act: the signature must be tied to a specific
+  // document version via content_hash). Fail-fast BEFORE creating the
+  // promoter so a missing template doesn't leave a promoter without a
+  // recorded consent. Same template_id list goes into the RPC so the
+  // documents.signings INSERTs happen atomically with the promoter INSERT
+  // (closes audit 🟡 R3).
   const { data: ndaTemplate, error: ndaErr } = await supabase
     .schema("documents")
     .from("templates")
@@ -131,6 +134,23 @@ export async function selfRegister(req: Request, res: Response) {
     logger.error({ err: ndaErr }, "NDA template missing - cannot record clickwrap consent");
     res.status(503).json({
       error: { code: "NDA_TEMPLATE_MISSING", message: "NDA template not configured; cannot record consent. Please contact support." },
+    });
+    return;
+  }
+
+  const { data: aaTemplate, error: aaErr } = await supabase
+    .schema("documents")
+    .from("templates")
+    .select("id, content_hash, version")
+    .eq("type", "kol_affiliate_agreement")
+    .eq("is_active", true)
+    .order("version", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (aaErr || !aaTemplate) {
+    logger.error({ err: aaErr }, "Affiliate Agreement template missing - cannot record clickwrap consent");
+    res.status(503).json({
+      error: { code: "AA_TEMPLATE_MISSING", message: "Affiliate Agreement template not configured; cannot record consent. Please contact support." },
     });
     return;
   }
@@ -206,6 +226,10 @@ export async function selfRegister(req: Request, res: Response) {
     p_platform: body.primaryPlatform,
     p_platform_url: body.primaryPlatformUrl,
     p_recruited_by_agent_id: recruitedByAgentId,
+    p_nda_template_id: ndaTemplate.id,
+    p_aa_template_id: aaTemplate.id,
+    p_signed_ip: extractClientIp(req),
+    p_signed_ua: req.get("user-agent") ?? null,
   });
 
   if (error) {
@@ -220,39 +244,11 @@ export async function selfRegister(req: Request, res: Response) {
     return;
   }
 
-  // Record the clickwrap NDA consent in documents.signings (ESIGN Act).
-  // The promoter already exists; a failure here is logged loudly but does
-  // NOT fail the registration (ops reconciles). signature_text is the typed
-  // name (clickwrap signature); signed_content_hash ties to the NDA version.
+  // The promoter RPC wrote documents.signings for both NDA + Affiliate
+  // Agreement inside its SECURITY DEFINER transaction (closes 🟡 R3). If
+  // either signing insert failed, the RPC throws and we never reach here
+  // — no orphan promoter. The promoterId is only present on success.
   const promoterId: string | null = data?.promoter?.id ?? null;
-  if (promoterId) {
-    const { error: signErr } = await supabase
-      .schema("documents")
-      .from("signings")
-      .insert({
-        template_id: ndaTemplate.id,
-        signer_email: body.email,
-        signer_name: body.name,
-        signer_type: "kol",
-        promoter_id: promoterId,
-        status: "signed",
-        signed_at: new Date().toISOString(),
-        signed_ip: extractClientIp(req),
-        signed_ua: req.get("user-agent") ?? null,
-        signature_text: body.name,
-        signed_content_hash: ndaTemplate.content_hash,
-        invited_by_email: null,
-        notes: "clickwrap consent at registration",
-      });
-    if (signErr) {
-      logger.error(
-        { err: signErr, promoterId, email: body.email },
-        "FAILED to record NDA clickwrap consent in documents.signings",
-      );
-    }
-  } else {
-    logger.warn({ email: body.email }, "promoter_id missing from RPC response; NDA consent not recorded");
-  }
 
   // Notify admin of the new KOL registration (best-effort - don't block).
   if (promoterId) {

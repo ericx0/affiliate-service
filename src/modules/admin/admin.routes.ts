@@ -19,6 +19,7 @@ import {
 } from "./admin.controller.js";
 import { listAgents, listAgentKols } from "./agents.controller.js";
 import { listFraudFlags, resolveFraudFlag } from "../fraud/fraud.admin.controller.js";
+import { getSigningsByEmail } from "./signings.controller.js";
 
 export const adminRouter = Router();
 
@@ -64,3 +65,8 @@ adminRouter.get("/payouts", listPayouts);
 
 // Audit logs (read-only)
 adminRouter.get("/audit-logs", listAuditLogs);
+
+// Document signings (audit-only; supports E2E assertion that fresh
+// KOL register writes both NDA + Affiliate Agreement documents.signings
+// rows atomically — closes audit 🟡 R4).
+adminRouter.get("/signings", getSigningsByEmail);
