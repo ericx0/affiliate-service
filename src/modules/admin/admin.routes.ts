@@ -20,6 +20,7 @@ import {
 import { listAgents, listAgentKols } from "./agents.controller.js";
 import { listFraudFlags, resolveFraudFlag } from "../fraud/fraud.admin.controller.js";
 import { getSigningsByEmail } from "./signings.controller.js";
+import { getTaxFormSignedUrl, postStripeReset } from "./kyc.controller.js";
 
 export const adminRouter = Router();
 
@@ -70,3 +71,7 @@ adminRouter.get("/audit-logs", listAuditLogs);
 // KOL register writes both NDA + Affiliate Agreement documents.signings
 // rows atomically — closes audit 🟡 R4).
 adminRouter.get("/signings", getSigningsByEmail);
+
+// KYC view (admin-only): signed tax-form PDF URL + Stripe onboarding reset link
+adminRouter.get("/promoters/:id/tax-form-url", getTaxFormSignedUrl);
+adminRouter.post("/promoters/:id/stripe-reset", postStripeReset);

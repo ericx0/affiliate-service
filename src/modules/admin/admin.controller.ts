@@ -35,6 +35,35 @@ const adminCtx = (req: Request) => {
   };
 };
 
+// Fetch live Stripe Connect account state for the admin KYC view.
+// Returns a flat subset of fields the UI needs; on failure returns
+// { id, error } so the response stays 200 and the UI can show
+// "Stripe 暂时不可用" instead of breaking the whole detail page.
+async function fetchStripeAccount(accountId: string) {
+  try {
+    const a = await stripe.accounts.retrieve(accountId);
+    return {
+      id: a.id,
+      details_submitted: a.details_submitted,
+      charges_enabled: a.charges_enabled,
+      payouts_enabled: a.payouts_enabled,
+      requirements: {
+        currently_due: a.requirements?.currently_due ?? [],
+        eventually_due: a.requirements?.eventually_due ?? [],
+        past_due: a.requirements?.past_due ?? [],
+        disabled_reason: a.requirements?.disabled_reason ?? null,
+      },
+      country: a.country,
+      default_currency: a.default_currency,
+      email: a.email,
+      business_type: a.business_type,
+    };
+  } catch (err) {
+    logger.warn({ err, accountId }, "stripe.accounts.retrieve failed");
+    return { id: accountId, error: "stripe_unavailable" as const };
+  }
+}
+
 // ============================================================
 // PAYOUT endpoints (Phase 3) — unchanged
 // ============================================================
@@ -144,7 +173,12 @@ export async function getPromoter(req: Request, res: Response) {
   const { data, error } = await supabase.rpc("affiliate_get_promoter", { p_id: id });
   if (error) return internalError(res, "QUERY_FAILED", error);
   if (!data) return res.status(404).json({ error: { code: "NOT_FOUND", message: "Promoter not found" } });
-  res.json(data);
+  // KYC view: attach live Stripe Connect state if a connected account exists.
+  // Tax-form data already comes from the RPC via the LEFT JOIN (object or null).
+  const stripe_account = data.stripe_account_id
+    ? await fetchStripeAccount(data.stripe_account_id)
+    : null;
+  res.json({ ...data, stripe_account });
 }
 
 const UpdatePromoterSchema = z.object({
