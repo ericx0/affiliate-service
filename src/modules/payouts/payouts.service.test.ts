@@ -9,6 +9,7 @@ const mockState = vi.hoisted(() => ({
   transitionResult: { success: true, commission: { id: "x" } as any },
   transitions: [] as Array<{ id: string; to: string; metadata: any }>,
   taxFormStatus: "submitted" as string | null,
+  affiliateFromCalls: [] as string[],
 }));
 
 vi.mock("../../config.js", () => ({
@@ -17,8 +18,18 @@ vi.mock("../../config.js", () => ({
       create: (...args: any[]) => mockState.stripeTransfersCreate(...args),
     },
   },
+  // The public-schema client must NOT be used for affiliate.* tables.
+  // Any accidental regression to `supabase.from(...)` throws here.
   supabase: {
     from: (table: string) => {
+      throw new Error("public client must not query affiliate tables: " + table);
+    },
+  },
+  // payouts.service.ts queries affiliate.* tables (promoters, tax_forms)
+  // via this schema-scoped client with unprefixed table names.
+  affiliateSupabase: {
+    from: (table: string) => {
+      mockState.affiliateFromCalls.push(table);
       if (table === "promoters") {
         return {
           select: () => ({
@@ -32,7 +43,7 @@ vi.mock("../../config.js", () => ({
           }),
         };
       }
-      if (table === "affiliate.tax_forms") {
+      if (table === "tax_forms") {
         return {
           select: () => ({
             eq: () => ({
@@ -67,11 +78,25 @@ beforeEach(() => {
   mockState.promoterById.clear();
   mockState.transitions = [];
   mockState.taxFormStatus = "submitted";
+  mockState.affiliateFromCalls = [];
   mockState.promoterById.set("p1", {
     stripe_account_id: "acct_1",
     stripe_onboarding_completed: true,
   });
   mockState.stripeTransfersCreate.mockResolvedValue({ id: "tr_123" });
+});
+
+describe("payPromoterGroup — schema client regression", () => {
+  it("queries promoters via the affiliate-schema client, not the public one", async () => {
+    // Regression: payPromoterGroup previously used the public-schema
+    // `supabase` client for affiliate.promoters — in prod that table does
+    // not exist in `public`, so the monthly batch would find no rows.
+    // The public client's from() throws in this mock, and we assert the
+    // lookup actually went through affiliateSupabase.
+    const result = await payPromoterGroup("p1", "USD", ["c1"], 4000);
+    expect(result.success).toBe(true);
+    expect(mockState.affiliateFromCalls).toContain("promoters");
+  });
 });
 
 describe("payPromoterGroup — F29 regression", () => {

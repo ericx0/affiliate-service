@@ -26,11 +26,18 @@ vi.mock("../../config.js", () => ({
         error: null,
       })),
     }),
+    from: () => {
+      throw new Error("unmocked table on public client");
+    },
+  },
+  // fraud.service.ts queries affiliate.* tables (promoters, fraud_flags,
+  // commissions) via this schema-scoped client, with unprefixed table names.
+  affiliateSupabase: {
     from: (table: string) => {
-      if (table === "affiliate.promoters") {
+      if (table === "promoters") {
         return chainable(async () => ({ data: mockState.promoterContact, error: null }));
       }
-      if (table === "affiliate.fraud_flags") {
+      if (table === "fraud_flags") {
         return {
           select: () => ({
             eq: () => ({

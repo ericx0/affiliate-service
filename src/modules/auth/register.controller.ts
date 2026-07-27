@@ -52,6 +52,10 @@ function extractClientIp(req: Request): string | null {
  *  - Verifies the body's `email` matches the verified user's email
  *    to prevent an attacker from creating phantom promoter rows
  *    for arbitrary emails.
+ *  - Requires a valid agent binding (agent_invite_code / ?agent= /
+ *    referralCode fallback resolving to an active role='agent'
+ *    promoter). Unbinded self-registration is rejected with 400
+ *    (INVITE_CODE_REQUIRED / INVALID_INVITE_CODE).
  *  - Per-email rate limit (AS-P2-8): 5 attempts per email per hour
  *    via the rate_limit_consume RPC. Single-IP NAT bypasses the
  *    IP-based limit in index.ts; this second layer keys on email.
@@ -155,29 +159,31 @@ export async function selfRegister(req: Request, res: Response) {
     return;
   }
 
-  // Resolve the recruiting agent. Two mechanisms (TRD-2026-003 B3#4):
+  // Resolve the recruiting agent. KOL self-registration REQUIRES a valid
+  // agent binding — every KOL must have a traceable source (external
+  // agents and internal staff each have their own agent account).
+  // Unbinded self-registration is no longer allowed.
+  //
+  // Two mechanisms (TRD-2026-003 B3#4):
   //
   //   1. agent_invite_code (preferred) - looked up via
   //      affiliate.promoters.agent_invite_code where role='agent' AND
-  //      status='active'. If provided but not found, IGNORE (no error) -
-  //      a stale invite link should still let the KOL register.
+  //      status='active'. ?agent= query wins over body.agent_invite_code.
   //
   //   2. referralCode (fallback) - existing mechanism, looked up via
-  //      affiliate.referral_codes. If provided AND invalid -> 400 (the
-  //      user typed a code that doesn't match; surface the error so they
-  //      can correct it).
+  //      affiliate.referral_codes; must belong to an ACTIVE AGENT (only
+  //      agents can recruit — a code owned by a regular KOL is rejected).
   //
-  // If neither resolves an agent, register WITHOUT binding
-  // (p_recruited_by_agent_id=NULL). The RPC handles null gracefully.
+  // Neither code provided          -> 400 INVITE_CODE_REQUIRED
+  // Code(s) provided but unresolved -> 400 INVALID_INVITE_CODE
   let recruitedByAgentId: string | null = null;
+  let anyCodeProvided = false;
 
-  // ?agent= query param wins over body.agent_invite_code (TRD writes it as
-  // "?agent="; we also accept body.agent_invite_code for clients that prefer
-  // to send everything in the body).
   const queryAgent = typeof req.query.agent === "string" ? req.query.agent : null;
   const agentInviteCode = body.agent_invite_code || queryAgent;
 
   if (agentInviteCode) {
+    anyCodeProvided = true;
     const { data: agentRow, error: agentLookupErr } = await affiliateSupabase.from("promoters")
       .select("id")
       .eq("agent_invite_code", agentInviteCode.toUpperCase())
@@ -185,25 +191,25 @@ export async function selfRegister(req: Request, res: Response) {
       .eq("status", "active")
       .maybeSingle();
     if (agentLookupErr) {
-      // Log but don't fail - fall through to referralCode / no-binding.
+      // Log but fall through to the referralCode path / 400 below.
       logger.error({ err: agentLookupErr }, "agent_invite_code lookup failed");
     } else if (agentRow) {
       recruitedByAgentId = agentRow.id;
     }
-    // Not found -> ignore (TRD: 找不到 -> 忽略，不报错，正常注册)
   }
 
   // Fall back to referralCode if agent_invite_code didn't resolve an agent.
-  // Keep the existing 400-on-invalid behavior so user-typed invalid codes
-  // surface a correction prompt rather than silently unbinding.
+  // An invalid user-typed code fails fast with 400 (same semantics as
+  // before, unified under the invite-code error codes).
   if (!recruitedByAgentId && body.referralCode) {
+    anyCodeProvided = true;
     const { data: codeRow, error: codeErr } = await affiliateSupabase.from("referral_codes")
       .select("promoter_id, promoters!inner(id, role, status)")
       .eq("code", body.referralCode.toUpperCase())
       .eq("is_active", true)
       .maybeSingle();
     if (codeErr || !codeRow) {
-      res.status(400).json({ error: { code: "INVALID_REFERRAL_CODE", message: "Invalid or inactive referral code" } });
+      res.status(400).json({ error: { code: "INVALID_INVITE_CODE", message: "Invalid or inactive invite code" } });
       return;
     }
     // Cast via unknown: Supabase types the !inner relation as an array, but
@@ -212,10 +218,19 @@ export async function selfRegister(req: Request, res: Response) {
     // type; the runtime shape is a single object.
     const refCodeAgent = codeRow.promoters as unknown as { id: string; role: string; status: string } | null;
     if (!refCodeAgent || refCodeAgent.role !== "agent" || refCodeAgent.status !== "active") {
-      res.status(400).json({ error: { code: "INVALID_REFERRAL_CODE", message: "Referral code does not belong to an active agent" } });
+      res.status(400).json({ error: { code: "INVALID_INVITE_CODE", message: "Invite code does not belong to an active agent" } });
       return;
     }
     recruitedByAgentId = refCodeAgent.id;
+  }
+
+  if (!recruitedByAgentId) {
+    res.status(400).json({
+      error: anyCodeProvided
+        ? { code: "INVALID_INVITE_CODE", message: "Invalid or inactive agent invite code. Please verify the code with your agent and try again." }
+        : { code: "INVITE_CODE_REQUIRED", message: "An agent invite code is required to register. Please ask your agent for their invite code or registration link." },
+    });
+    return;
   }
 
   const { data, error } = await supabase.rpc("affiliate_self_register_promoter", {

@@ -13,82 +13,97 @@ const { state } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("../../config.js", () => ({
-  env: {
-    LOG_LEVEL: "warn",
-    NODE_ENV: "test",
-  },
-  supabase: {
-    from: vi.fn((table: string) => {
-      if (table === "affiliate.refund_events") {
-        return {
-          insert: vi.fn(async () => ({ error: state.insertError })),
-          delete: vi.fn(() => ({
-            eq: vi.fn((col: string, val: string) => {
-              state.refundEventDeletes.push(`${col}=${val}`);
-              return { error: null };
-            }),
-          })),
-        };
-      }
-      // commissions table
+vi.mock("../../config.js", () => {
+  // orders.controller.ts queries affiliate.* tables (refund_events,
+  // commissions) via the schema-scoped affiliateSupabase client with
+  // unprefixed table names. The same handler backs both clients.
+  const fromHandler = (table: string) => {
+    if (table === "refund_events") {
       return {
         insert: vi.fn(async () => ({ error: state.insertError })),
-        select: vi.fn(() => ({
-          eq: vi.fn(() => ({
-            // Awaited directly by getCommissionsForOrder (destructure { data }).
-            // Getters keep the value dynamic per-test.
-            get data() {
-              return state.commissions;
-            },
-            get error() {
-              return null;
-            },
-            maybeSingle: vi.fn(async () => ({
-              data: state.commission,
-              error: null,
-            })),
-            single: vi.fn(async () => ({
-              data: state.commission,
-              error: null,
-            })),
-            in: vi.fn(() => ({
-              data: state.commissions,
-              error: null,
-            })),
+        delete: vi.fn(() => ({
+          eq: vi.fn((col: string, val: string) => {
+            state.refundEventDeletes.push(`${col}=${val}`);
+            return { error: null };
+          }),
+        })),
+      };
+    }
+    // commissions table
+    return {
+      insert: vi.fn(async () => ({ error: state.insertError })),
+      select: vi.fn(() => ({
+        eq: vi.fn(() => ({
+          // Awaited directly by getCommissionsForOrder (destructure { data }).
+          // Getters keep the value dynamic per-test.
+          get data() {
+            return state.commissions;
+          },
+          get error() {
+            return null;
+          },
+          maybeSingle: vi.fn(async () => ({
+            data: state.commission,
+            error: null,
+          })),
+          single: vi.fn(async () => ({
+            data: state.commission,
+            error: null,
+          })),
+          in: vi.fn(() => ({
+            data: state.commissions,
+            error: null,
           })),
         })),
-        update: vi.fn((payload: any) => {
-          state.updateCalls.push(payload);
-          return {
-            eq: vi.fn(() => ({
-              in: vi.fn(() => ({
-                // Awaited by direct UPDATE in onOrderRefunded (destructure { error }).
-                // Also chained by transition(): .in().select().single().
-                get error() {
-                  return null;
-                },
-                select: vi.fn(() => ({
-                  single: vi.fn(async () => ({
-                    data: state.commission,
-                    error: null,
-                  })),
+      })),
+      update: vi.fn((payload: any) => {
+        state.updateCalls.push(payload);
+        return {
+          eq: vi.fn(() => ({
+            // Awaited by onOrderPaid's CAS update (.eq().is()).
+            is: vi.fn(() => ({
+              get error() {
+                return null;
+              },
+            })),
+            in: vi.fn(() => ({
+              // Awaited by direct UPDATE in onOrderRefunded (destructure { error }).
+              // Also chained by transition(): .in().select().single().
+              get error() {
+                return null;
+              },
+              select: vi.fn(() => ({
+                single: vi.fn(async () => ({
+                  data: state.commission,
+                  error: null,
                 })),
               })),
             })),
-          };
-        }),
-      };
-    }),
-  },
-  stripe: {
-    transfers: {
-      createReversal: vi.fn(async () => ({ id: "trr_1" })),
+          })),
+        };
+      }),
+    };
+  };
+  return {
+    env: {
+      LOG_LEVEL: "warn",
+      NODE_ENV: "test",
     },
-  },
-}));
+    supabase: {
+      from: vi.fn(fromHandler),
+    },
+    affiliateSupabase: {
+      from: vi.fn(fromHandler),
+    },
+    stripe: {
+      transfers: {
+        createReversal: vi.fn(async () => ({ id: "trr_1" })),
+      },
+    },
+  };
+});
 
-import { onOrderRefunded } from "./orders.controller.js";
+import { onOrderRefunded, onOrderPaid, onOrderCompleted } from "./orders.controller.js";
 import { supabase, stripe } from "../../config.js";
 
 const UUID = "00000000-0000-0000-0000-000000000001";
@@ -468,6 +483,61 @@ describe("onOrderRefunded - partial refund", () => {
         cumulative_refunded_amount: 400,
       }),
     );
+  });
+});
+
+describe("onOrderPaid / onOrderCompleted idempotency", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.insertError = null;
+    state.updateCalls = [];
+  });
+
+  it("onOrderPaid sets order_paid_at once; replay is a no-op", async () => {
+    stageCommission({ status: "pending", order_paid_at: null });
+    const req: any = { body: { orderId: UUID, occurredAt: "2026-07-20T00:00:00.000Z" } };
+    const r1 = makeRes();
+    await onOrderPaid(req, r1.res);
+    expect(r1.json).toHaveBeenCalledWith(expect.objectContaining({ success: true, commissionsUpdated: 1 }));
+    expect(state.updateCalls).toContainEqual(
+      expect.objectContaining({ order_paid_at: "2026-07-20T00:00:00.000Z" }),
+    );
+
+    // Replay (e.g. second caller): order_paid_at already set -> skip.
+    stageCommission({ status: "pending", order_paid_at: "2026-07-20T00:00:00.000Z" });
+    state.updateCalls = [];
+    const r2 = makeRes();
+    await onOrderPaid(req, r2.res);
+    expect(r2.json).toHaveBeenCalledWith(expect.objectContaining({ success: true, commissionsUpdated: 0 }));
+    expect(state.updateCalls.length).toBe(0);
+  });
+
+  it("onOrderPaid never touches terminal (refunded/reversed) commissions", async () => {
+    stageCommission({ status: "refunded", order_paid_at: null });
+    const req: any = { body: { orderId: UUID } };
+    const r = makeRes();
+    await onOrderPaid(req, r.res);
+    expect(r.json).toHaveBeenCalledWith(expect.objectContaining({ success: true, commissionsUpdated: 0 }));
+    expect(state.updateCalls.length).toBe(0);
+  });
+
+  it("onOrderCompleted transitions pending -> cooling_down; replay is a no-op", async () => {
+    stageCommission({ status: "pending" });
+    const req: any = { body: { orderId: UUID, occurredAt: "2026-07-21T00:00:00.000Z" } };
+    const r1 = makeRes();
+    await onOrderCompleted(req, r1.res);
+    expect(r1.json).toHaveBeenCalledWith(expect.objectContaining({ success: true, commissionsCooled: 1 }));
+    expect(state.updateCalls).toContainEqual(
+      expect.objectContaining({ status: "cooling_down" }),
+    );
+
+    // Replay: commission already cooling_down -> nothing transitions.
+    stageCommission({ status: "cooling_down" });
+    state.updateCalls = [];
+    const r2 = makeRes();
+    await onOrderCompleted(req, r2.res);
+    expect(r2.json).toHaveBeenCalledWith(expect.objectContaining({ success: true, commissionsCooled: 0 }));
+    expect(state.updateCalls.length).toBe(0);
   });
 });
 

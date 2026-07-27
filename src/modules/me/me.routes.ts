@@ -30,9 +30,11 @@ meRouter.get("/payouts", getMyPayouts);
 meRouter.get("/tax-form", getMyTaxForm);
 meRouter.post("/tax-form", submitMyTaxForm);
 // The portal calls GET/PATCH /api/affiliate/me (router root). "/me" is
-// kept for backward compatibility.
+// kept for backward compatibility; "/profile" is the explicit alias the
+// portal uses for the review-state contract (profile.status).
 meRouter.get("/", getMe);
 meRouter.get("/me", getMe);
+meRouter.get("/profile", getMe);
 meRouter.patch("/", updateMe);
 meRouter.get("/stripe-status", getMyStripeStatus);
 meRouter.post("/stripe-connect", postMyStripeConnect);

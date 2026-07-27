@@ -36,6 +36,19 @@ vi.mock("../../config.js", () => ({
       })),
     })),
   },
+  // commissions.service.ts queries affiliate.* tables via this client.
+  affiliateSupabase: {
+    from: vi.fn(() => ({
+      select: vi.fn(() => ({
+        eq: vi.fn(() => ({
+          single: vi.fn(async () => ({
+            data: state.commission,
+            error: state.commission ? null : { code: "PGRST116", message: "no rows" },
+          })),
+        })),
+      })),
+    })),
+  },
   stripe: {
     transfers: {
       createReversal: vi.fn(async () => {

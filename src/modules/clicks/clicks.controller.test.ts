@@ -1,0 +1,153 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// Shared mutable state so each test can stage referral code lookups and
+// observe referral_clicks inserts. vi.hoisted runs before vi.mock factories.
+const { state } = vi.hoisted(() => ({
+  state: {
+    codeRow: null as null | { promoter_id: string; is_active: boolean; expires_at: string | null },
+    existingClicks: [] as Array<{ id: string }>,
+    inserts: [] as Array<Record<string, any>>,
+  },
+}));
+
+vi.mock("../../config.js", () => ({
+  env: {
+    LOG_LEVEL: "warn",
+    NODE_ENV: "test",
+    ATTRIBUTION_WINDOW_DAYS: 30,
+  },
+  affiliateSupabase: {
+    from: (table: string) => {
+      if (table === "referral_codes") {
+        return {
+          select: () => ({
+            eq: () => ({
+              eq: () => ({
+                single: async () =>
+                  state.codeRow
+                    ? { data: state.codeRow, error: null }
+                    : { data: null, error: { message: "not found" } },
+              }),
+            }),
+          }),
+        };
+      }
+      if (table === "referral_clicks") {
+        return {
+          select: () => ({
+            eq: () => ({
+              eq: () => ({
+                gte: () => ({
+                  limit: async () => ({ data: state.existingClicks, error: null }),
+                }),
+              }),
+              gte: () => ({
+                limit: async () => ({ data: state.existingClicks, error: null }),
+              }),
+            }),
+          }),
+          insert: (row: Record<string, any>) => {
+            state.inserts.push(row);
+            return {
+              select: () => ({
+                single: async () => ({ data: { id: "click-1", ...row }, error: null }),
+              }),
+            };
+          },
+        };
+      }
+      throw new Error("unmocked table " + table);
+    },
+  },
+}));
+
+vi.mock("../../utils/logger.js", () => ({
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+}));
+
+import { track } from "./clicks.controller.js";
+
+function makeReqRes(body: unknown) {
+  const req: any = {
+    body,
+    ip: "203.0.113.10",
+    get: (h: string) => (h === "user-agent" ? "edge-middleware/1.0" : undefined),
+  };
+  let statusCode = 0;
+  let ended = false;
+  const res: any = {
+    status(code: number) {
+      statusCode = code;
+      return this;
+    },
+    end() {
+      ended = true;
+      return this;
+    },
+  };
+  return { req, res, getStatus: () => statusCode, wasEnded: () => ended };
+}
+
+beforeEach(() => {
+  state.codeRow = { promoter_id: "p1", is_active: true, expires_at: null };
+  state.existingClicks = [];
+  state.inserts = [];
+});
+
+describe("POST /api/affiliate/clicks/track", () => {
+  it("records a click for a valid code and answers 204", async () => {
+    const { req, res, getStatus, wasEnded } = makeReqRes({
+      code: "ABCD1234",
+      landingPath: "/services/checkup",
+      referrer: "https://twitter.com/kol",
+      utmSource: "x",
+      utmMedium: "social",
+      utmCampaign: "launch",
+    });
+    await track(req, res);
+    expect(getStatus()).toBe(204);
+    expect(wasEnded()).toBe(true);
+    expect(state.inserts).toHaveLength(1);
+    expect(state.inserts[0]).toMatchObject({
+      referral_code: "ABCD1234",
+      promoter_id: "p1",
+      ip_address: "203.0.113.10",
+      user_agent: "edge-middleware/1.0",
+      landing_path: "/services/checkup",
+      referrer: "https://twitter.com/kol",
+      utm_source: "x",
+      utm_medium: "social",
+      utm_campaign: "launch",
+    });
+  });
+
+  it("answers 204 without writing for an unknown code (no probing)", async () => {
+    state.codeRow = null;
+    const { req, res, getStatus } = makeReqRes({ code: "ABCD1234" });
+    await track(req, res);
+    expect(getStatus()).toBe(204);
+    expect(state.inserts).toHaveLength(0);
+  });
+
+  it("answers 204 without writing for a malformed code", async () => {
+    const { req, res, getStatus } = makeReqRes({ code: "!!bad!!" });
+    await track(req, res);
+    expect(getStatus()).toBe(204);
+    expect(state.inserts).toHaveLength(0);
+  });
+
+  it("answers 204 for a malformed body", async () => {
+    const { req, res, getStatus } = makeReqRes({ landingPath: "/x" }); // no code
+    await track(req, res);
+    expect(getStatus()).toBe(204);
+    expect(state.inserts).toHaveLength(0);
+  });
+
+  it("dedupes repeat clicks from the same IP+code within 1h", async () => {
+    state.existingClicks = [{ id: "click-existing" }];
+    const { req, res, getStatus } = makeReqRes({ code: "ABCD1234" });
+    await track(req, res);
+    expect(getStatus()).toBe(204);
+    expect(state.inserts).toHaveLength(0);
+  });
+});

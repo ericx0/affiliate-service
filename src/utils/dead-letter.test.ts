@@ -20,6 +20,18 @@ describe("dead-letter retry", () => {
           update: vi.fn().mockReturnThis(),
         }),
       },
+      // dead-letter.ts reads/writes affiliate.* tables via this client.
+      affiliateSupabase: {
+        from: vi.fn().mockReturnValue({
+          select: vi.fn().mockReturnThis(),
+          eq: vi.fn().mockReturnThis(),
+          single: vi.fn().mockResolvedValue({
+            data: { id: "evt1", payload: { foo: "bar" }, retry_count: 0, status: "pending" },
+            error: null,
+          }),
+          update: vi.fn().mockReturnThis(),
+        }),
+      },
     }));
 
     const handler = vi.fn().mockResolvedValue(undefined);

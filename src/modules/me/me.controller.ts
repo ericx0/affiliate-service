@@ -85,7 +85,12 @@ export async function getMyPayouts(req: Request, res: Response) {
 }
 
 /**
- * GET /me — promoter profile subset (name, email, country, platform).
+ * GET /me — promoter profile subset (name, email, country, platform, status).
+ *
+ * `status` is the explicit review-state contract: the portal branches on
+ * profile.status === 'pending' to show the "awaiting review" UI. The
+ * affiliate_get_me RPC returns it; if an older RPC (without status) is
+ * still deployed, fall back to the promoter row kol-auth already loaded.
  */
 export async function getMe(req: Request, res: Response) {
   const promoterId = req.promoter?.id;
@@ -101,7 +106,10 @@ export async function getMe(req: Request, res: Response) {
     internalError(res, "QUERY_FAILED", error);
     return;
   }
-  res.json({ data: data ?? null });
+  const profile = data
+    ? { ...(data as Record<string, unknown>), status: (data as any).status ?? req.promoter?.status ?? null }
+    : null;
+  res.json({ data: profile });
 }
 
 // Fields a KOL may update on their own profile. Email is deliberately
@@ -178,6 +186,19 @@ export async function createMyCode(req: Request, res: Response) {
   const promoterId = req.promoter?.id;
   if (!promoterId) {
     res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing promoter context" } });
+    return;
+  }
+
+  // Review gate: a pending (awaiting admin approval) or otherwise
+  // non-active promoter cannot create referral codes. Pending KOLs may
+  // still use the rest of the portal (tax form, Stripe onboarding).
+  if (req.promoter?.status !== "active") {
+    res.status(403).json({
+      error: {
+        code: "PROMOTER_NOT_ACTIVE",
+        message: "Your account is pending review. Referral codes become available after approval.",
+      },
+    });
     return;
   }
 

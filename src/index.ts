@@ -8,6 +8,7 @@ import { logger } from "./utils/logger.js";
 import { hmacMiddleware } from "./middleware/hmac.js";
 import { errorHandler } from "./middleware/error.js";
 import { ordersRouter } from "./modules/orders/orders.routes.js";
+import { clicksRouter } from "./modules/clicks/clicks.routes.js";
 import { adminRouter } from "./modules/admin/admin.routes.js";
 import { promotersRouter } from "./modules/promoters/promoters.routes.js";
 import { adminAuthRouter } from "./modules/auth/auth.routes.js";
@@ -49,6 +50,16 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Click tracking is public (no HMAC/JWT) and called server-side by the
+// main-site edge middleware. Generous limit: one edge worker can legitimately
+// fire many tracks from the same egress IP; the limit only stops abuse.
+const clickLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 120, // 120 requests / minute / IP
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+});
+
 app.use(pinoHttp({ logger }));
 
 // Webhook route needs raw body — register BEFORE express.json()
@@ -79,7 +90,9 @@ app.get("/health", (_req, res) => res.json({ status: "ok", service: "affiliate-s
 //   /api/affiliate/auth/admin/*   — JWT only (setup 2FA itself)
 //   /api/affiliate/me/*           — KOL self-service (dashboard data)
 //   /api/affiliate/auth/register  — KOL self-registration (signed in, email-verified)
+//   /api/affiliate/clicks/*       — public click tracking (rate-limited, always 204)
 app.use("/api/affiliate/orders", hmacMiddleware(env.LCM_AFFILIATE_SECRET), ordersRouter);
+app.use("/api/affiliate/clicks", clickLimiter, clicksRouter);  // public — no HMAC/JWT
 app.use("/api/affiliate/admin", authLimiter, adminRouter);   // adminAuthMiddleware inside adminRouter
 app.use("/api/affiliate/promoters", authLimiter, promotersRouter);  // adminAuthMiddleware inside promotersRouter
 app.use("/api/affiliate/auth/admin", authLimiter, adminAuthRouter);

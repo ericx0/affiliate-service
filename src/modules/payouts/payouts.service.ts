@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { stripe, supabase, affiliateSupabase } from "../../config.js";
+import { stripe, affiliateSupabase } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { transition } from "../commissions/commissions.service.js";
 import { groupCommissionsByPromoter, exceedsMinimum } from "./payouts.helpers.js";
@@ -133,7 +133,10 @@ export async function payPromoterGroup(
     .digest("hex")
     .slice(0, 16)}`;
 
-  const { data: promoter, error: promoterErr } = await supabase
+  // affiliate.promoters lives in the affiliate schema — must go through
+  // the schema-scoped client (unprefixed table name). The public-schema
+  // `supabase` client has no `promoters` table and would 404 in prod.
+  const { data: promoter, error: promoterErr } = await affiliateSupabase
     .from("promoters")
     .select("stripe_account_id, stripe_onboarding_completed")
     .eq("id", promoterId)

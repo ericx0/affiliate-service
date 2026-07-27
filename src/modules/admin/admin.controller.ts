@@ -476,3 +476,36 @@ export async function getDashboardStats(_req: Request, res: Response) {
   if (error) return internalError(res, "QUERY_FAILED", error);
   res.json(data);
 }
+
+// GET /admin/funnel?from=YYYY-MM-DD&to=YYYY-MM-DD
+// 'to' is an inclusive calendar day; the RPC range is [from, to+1day).
+// Default window: the last 30 days.
+const FunnelQuerySchema = z.object({
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "from must be YYYY-MM-DD").optional(),
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "to must be YYYY-MM-DD").optional(),
+});
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export async function getFunnel(req: Request, res: Response) {
+  const parsed = FunnelQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: { code: "VALIDATION_ERROR", message: "from/to must be YYYY-MM-DD" },
+    });
+  }
+
+  const toExclusive = parsed.data.to
+    ? new Date(`${parsed.data.to}T00:00:00.000Z`).getTime() + DAY_MS
+    : Date.now();
+  const fromMs = parsed.data.from
+    ? new Date(`${parsed.data.from}T00:00:00.000Z`).getTime()
+    : toExclusive - 30 * DAY_MS;
+
+  const { data, error } = await supabase.rpc("affiliate_admin_funnel", {
+    p_from: new Date(fromMs).toISOString(),
+    p_to: new Date(toExclusive).toISOString(),
+  });
+  if (error) return internalError(res, "QUERY_FAILED", error);
+  res.json(data);
+}

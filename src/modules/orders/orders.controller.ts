@@ -159,11 +159,17 @@ export async function onOrderPaid(req: Request, res: Response) {
   let count = 0;
 
   for (const c of commissions) {
-    // Update order_paid_at; may stay in pending if service not yet completed
-    await affiliateSupabase.from("commissions")
+    // Idempotency: order_paid_at is write-once. A replayed/duplicate
+    // delivery (main-site webhook + edge function both call this) finds
+    // the column already set and skips; the CAS predicate
+    // (.is order_paid_at null) makes concurrent duplicates no-ops too.
+    // Terminal rows (refunded/reversed) are never touched.
+    if (c.order_paid_at || c.status === "refunded" || c.status === "reversed") continue;
+    const { error } = await affiliateSupabase.from("commissions")
       .update({ order_paid_at: paidAt, updated_at: new Date().toISOString() })
-      .eq("id", c.id);
-    count++;
+      .eq("id", c.id)
+      .is("order_paid_at", null);
+    if (!error) count++;
   }
 
   logger.info({ orderId, count }, "order paid event processed");
@@ -179,7 +185,10 @@ export async function onOrderCompleted(req: Request, res: Response) {
 
   for (const c of commissions) {
     // Transition: pending → cooling_down (with 30-day cool-down per the
-    // published Commission Rules)
+    // published Commission Rules).
+    // Idempotent under duplicate delivery: only rows still in 'pending'
+    // are touched, and transition() is a CAS update gated on the current
+    // status, so replays and concurrent duplicates are no-ops.
     if (c.status === "pending") {
       const result = await transition(c.id, "cooling_down", {
         service_completed_at: completedAt,

@@ -13,7 +13,11 @@ import { logger } from "../utils/logger.js";
  * 2. Verify JWT via Supabase (using service-role client)
  * 3. Look up promoter row by email via affiliate_get_promoter_by_email RPC
  * 4. Reject if no promoter row found (user is signed in but isn't a KOL)
- * 5. Reject if promoter.status != 'active'
+ * 5. Reject if promoter.status is neither 'active' nor 'pending'.
+ *    'pending' (self-registered, awaiting admin review) MAY log in and
+ *    use the portal (tax form, Stripe Connect onboarding, dashboard),
+ *    but cannot create referral codes (enforced in createMyCode) and
+ *    earns no commission (order attach rejects non-active promoters).
  * 6. On success: attach `req.promoter = row`
  *
  * Differs from admin-auth.ts in:
@@ -135,7 +139,7 @@ export const kolAuthMiddleware: RequestHandler = async (req, res, next) => {
     return;
   }
 
-  if (promoter.status && promoter.status !== "active") {
+  if (promoter.status && promoter.status !== "active" && promoter.status !== "pending") {
     res.status(403).json({
       error: { code: "SUSPENDED", message: `Account is ${promoter.status}` },
     });

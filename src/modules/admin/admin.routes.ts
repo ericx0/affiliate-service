@@ -16,6 +16,7 @@ import {
   listPayouts,
   listAuditLogs,
   getDashboardStats,
+  getFunnel,
 } from "./admin.controller.js";
 import { listAgents, listAgentKols } from "./agents.controller.js";
 import { listFraudFlags, resolveFraudFlag } from "../fraud/fraud.admin.controller.js";
@@ -30,6 +31,9 @@ adminRouter.use(adminAuthMiddleware);
 
 // Dashboard
 adminRouter.get("/dashboard", getDashboardStats);
+
+// Funnel report (read-only; same JWT + is_admin gate as dashboard)
+adminRouter.get("/funnel", getFunnel);
 
 // Payouts (Phase 3)
 adminRouter.post("/payout/manual", manualPayout);
