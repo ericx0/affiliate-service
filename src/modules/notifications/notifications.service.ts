@@ -136,3 +136,51 @@ function escapeHtml(s: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
+
+const PORTAL_LOGIN_URL = "https://affiliate.linkchinamed.com/login";
+
+/**
+ * Agent onboarding welcome email (bilingual EN + 中文 in one message).
+ * Sent after an admin creates an agent. NEVER contains a plaintext
+ * password — the agent sets their own password via the recovery
+ * action link. If actionLink is null (generateLink failed), the copy
+ * falls back to "ask your admin to reset your password".
+ */
+export async function notifyAgentWelcome(agent: {
+  name: string;
+  email: string;
+  inviteCode: string;
+  actionLink: string | null;
+}): Promise<void> {
+  const setPasswordBlock = agent.actionLink
+    ? `<p><a href="${escapeHtml(agent.actionLink)}" style="display:inline-block;padding:10px 18px;background:#0b5fff;color:#ffffff;text-decoration:none;border-radius:6px;">Set your password / 设置密码</a></p>
+       <p style="color:#666;font-size:13px;">This link expires in 24 hours. If it expires, ask your admin to send a new one.<br/>该链接 24 小时内有效。如已过期，请联系管理员重新发送。</p>`
+    : `<p style="color:#666;font-size:13px;">Password setup link is temporarily unavailable — please ask your admin to reset your password.<br/>密码设置链接暂时不可用，请联系管理员为您重置密码。</p>`;
+
+  await notifyKol(
+    agent.email,
+    "Welcome to LinkChinaMed Partner Program / 欢迎加入 LinkChinaMed 合作伙伴计划",
+    `<h2>Welcome aboard, ${escapeHtml(agent.name)}!</h2>
+     <p>Your LinkChinaMed <b>agent</b> account is ready. Your agent invite code is:</p>
+     <p style="font-size:22px;font-weight:bold;letter-spacing:2px;background:#f4f6f8;padding:12px 16px;border-radius:6px;display:inline-block;">${escapeHtml(agent.inviteCode)}</p>
+     ${setPasswordBlock}
+     <p>Portal login: <a href="${PORTAL_LOGIN_URL}">${PORTAL_LOGIN_URL}</a></p>
+     <p><b>Get started in 3 steps:</b></p>
+     <ol>
+       <li>Log in to the partner portal.</li>
+       <li>Copy your invite link / invite code from the dashboard.</li>
+       <li>Share it to recruit KOLs — they bind to you at registration.</li>
+     </ol>
+     <hr style="border:none;border-top:1px solid #e5e5e5;margin:24px 0;"/>
+     <h2>欢迎加入，${escapeHtml(agent.name)}！</h2>
+     <p>您的 LinkChinaMed <b>代理</b>账号已开通。您的代理邀请码为：</p>
+     <p style="font-size:22px;font-weight:bold;letter-spacing:2px;background:#f4f6f8;padding:12px 16px;border-radius:6px;display:inline-block;">${escapeHtml(agent.inviteCode)}</p>
+     <p>门户登录地址：<a href="${PORTAL_LOGIN_URL}">${PORTAL_LOGIN_URL}</a></p>
+     <p><b>三步上手：</b></p>
+     <ol>
+       <li>登录合作伙伴门户。</li>
+       <li>在控制台复制您的专属邀请链接 / 邀请码。</li>
+       <li>分享给 KOL，他们在注册时即绑定到您名下。</li>
+     </ol>`,
+  );
+}
