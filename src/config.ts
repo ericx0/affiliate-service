@@ -24,6 +24,12 @@ const EnvSchema = z.object({
   ADMIN_NOTIFY_EMAIL: z.string().email().optional(),
   MAIL_FROM: z.string().optional(),
 
+  // OpenAI — used to suggest next steps after KOL<->client contact logs.
+  // Optional: the contact-log endpoint gracefully degrades (returns null
+  // suggestions) when OPENAI_API_KEY is absent.
+  OPENAI_API_KEY: z.string().optional(),
+  OPENAI_MODEL: z.string().default("gpt-4o-mini"),
+
   // Attribution window (days) for referral clicks. Default 30.
   ATTRIBUTION_WINDOW_DAYS: z.coerce.number().int().positive().default(30),
 
@@ -56,3 +62,17 @@ export const stripe = new Stripe(env.STRIPE_SECRET_KEY, {
   apiVersion: "2024-06-20",
   httpClient: Stripe.createFetchHttpClient(),
 });
+
+// OpenAI client — lazy so tests / dev without a key still import cleanly.
+// Use `getOpenAIClient()` from controllers; the helper returns null when
+// OPENAI_API_KEY is unset so callers can gracefully degrade (return null
+// suggestions instead of 500'ing).
+import OpenAI from "openai";
+let cachedOpenAi: OpenAI | null = null;
+export function getOpenAIClient(): OpenAI | null {
+  if (!env.OPENAI_API_KEY) return null;
+  if (!cachedOpenAi) {
+    cachedOpenAi = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+  }
+  return cachedOpenAi;
+}

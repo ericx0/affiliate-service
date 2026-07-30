@@ -15,6 +15,9 @@ import {
   postMyStripeConnect,
   getMyStripeStatus,
 } from "./stripe-connect.controller.js";
+import { getMyAnalytics } from "./analytics/analytics.controller.js";
+import { getMyTaxDocs } from "./tax-docs.controller.js";
+import { getMyProjection } from "./projection.controller.js";
 
 export const meRouter = Router();
 
@@ -38,3 +41,7 @@ meRouter.get("/profile", getMe);
 meRouter.patch("/", updateMe);
 meRouter.get("/stripe-status", getMyStripeStatus);
 meRouter.post("/stripe-connect", postMyStripeConnect);
+// Batch 8a: dashboard analytics, tax docs, commission projection.
+meRouter.get("/analytics", getMyAnalytics);
+meRouter.get("/tax-docs", getMyTaxDocs);
+meRouter.get("/commission-projection", getMyProjection);

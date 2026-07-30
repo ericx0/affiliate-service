@@ -19,6 +19,8 @@ import { handleStripeWebhook } from "./modules/payouts/stripe-webhook.controller
 import { startCooldownApprovalJob } from "./jobs/approve-expired-cooldown.js";
 import { startMonthlyPayoutJob } from "./jobs/monthly-payout-batch.js";
 import { cronRouter } from "./modules/cron/cron.routes.js";
+import { clientsRouter } from "./modules/clients/clients.routes.js";
+import { tasksRouter } from "./modules/tasks/tasks.routes.js";
 
 const app = express();
 
@@ -91,12 +93,16 @@ app.get("/health", (_req, res) => res.json({ status: "ok", service: "affiliate-s
 //   /api/affiliate/me/*           — KOL self-service (dashboard data)
 //   /api/affiliate/auth/register  — KOL self-registration (signed in, email-verified)
 //   /api/affiliate/clicks/*       — public click tracking (rate-limited, always 204)
+//   /api/affiliate/clients/*      — KOL self-service (CRUD + contact log)
+//   /api/affiliate/tasks/*        — KOL self-service (complete followup tasks)
 app.use("/api/affiliate/orders", hmacMiddleware(env.LCM_AFFILIATE_SECRET), ordersRouter);
 app.use("/api/affiliate/clicks", clickLimiter, clicksRouter);  // public — no HMAC/JWT
 app.use("/api/affiliate/admin", authLimiter, adminRouter);   // adminAuthMiddleware inside adminRouter
 app.use("/api/affiliate/promoters", authLimiter, promotersRouter);  // adminAuthMiddleware inside promotersRouter
 app.use("/api/affiliate/auth/admin", authLimiter, adminAuthRouter);
 app.use("/api/affiliate/me", authLimiter, meRouter);
+app.use("/api/affiliate/clients", authLimiter, clientsRouter);
+app.use("/api/affiliate/tasks", authLimiter, tasksRouter);
 app.use("/api/affiliate/agent", authLimiter, agentRouter);
 app.use("/api/affiliate/auth/register", authLimiter, registerRouter);
 app.use("/api/affiliate/cron", cronRouter);
