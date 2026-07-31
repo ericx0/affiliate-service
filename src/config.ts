@@ -33,6 +33,32 @@ const EnvSchema = z.object({
   // Attribution window (days) for referral clicks. Default 30.
   ATTRIBUTION_WINDOW_DAYS: z.coerce.number().int().positive().default(30),
 
+  // ---- Multi-platform social publishing (batch 8e-P0 / T1) ----
+  // Comma-separated allowlist of platforms whose app review has been
+  // approved. Empty = no platforms enabled (operator flips per
+  // platform as approvals land). Example: "ig,fb,x".
+  SOCIAL_PLATFORM_READY: z.string().optional(),
+
+  // Meta (Instagram + Facebook Business Login).
+  META_APP_ID: z.string().optional(),
+  META_APP_SECRET: z.string().optional(),
+
+  // Google (YouTube Data API v3).
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+
+  // LinkedIn UGC.
+  LINKEDIN_CLIENT_ID: z.string().optional(),
+  LINKEDIN_CLIENT_SECRET: z.string().optional(),
+
+  // X (Twitter) OAuth 2.0.
+  X_CLIENT_ID: z.string().optional(),
+  X_CLIENT_SECRET: z.string().optional(),
+
+  // TikTok for Developers.
+  TIKTOK_CLIENT_KEY: z.string().optional(),
+  TIKTOK_CLIENT_SECRET: z.string().optional(),
+
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
 });
 

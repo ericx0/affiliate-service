@@ -21,6 +21,10 @@ import { startMonthlyPayoutJob } from "./jobs/monthly-payout-batch.js";
 import { cronRouter } from "./modules/cron/cron.routes.js";
 import { clientsRouter } from "./modules/clients/clients.routes.js";
 import { tasksRouter } from "./modules/tasks/tasks.routes.js";
+import { socialRouter } from "./modules/social/social.routes.js";
+import { casesRouter } from "./modules/cases/cases.routes.js";
+import { emailTemplatesRouter } from "./modules/email-templates/email-templates.routes.js";
+import { funnelRouter } from "./modules/funnel/funnel.routes.js";
 
 const app = express();
 
@@ -35,9 +39,12 @@ app.use(cors({
 
 // Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc).
 // Skip for the Stripe webhook — it doesn't need these and Stripe's
-// content-type detection stays correct.
+// content-type detection stays correct. Also skip the social OAuth
+// callback so Meta/Google/etc can redirect without frame restrictions
+// getting in the way of their redirect URIs.
 app.use((req, res, next) => {
   if (req.path === "/webhooks/stripe") return next();
+  if (req.path.startsWith("/api/social/oauth/")) return next();
   return helmet()(req, res, next);
 });
 
@@ -106,6 +113,17 @@ app.use("/api/affiliate/tasks", authLimiter, tasksRouter);
 app.use("/api/affiliate/agent", authLimiter, agentRouter);
 app.use("/api/affiliate/auth/register", authLimiter, registerRouter);
 app.use("/api/affiliate/cron", cronRouter);
+// Batch 8e-P0 / T1: multi-platform social publishing.
+// OAuth callback route is unauthenticated (HMAC-signed state token
+// binds the callback to the promoter). All other endpoints require
+// the KOL session (enforced inside the router).
+app.use("/api/social", authLimiter, socialRouter);
+// Batch 8e-P0 / T2: real case library + AI rewrite.
+app.use("/api/affiliate/cases", authLimiter, casesRouter);
+// Batch 8e-P0 / T3: multi-language email / DM templates.
+app.use("/api/affiliate/email-templates", authLimiter, emailTemplatesRouter);
+// Batch 8e-P0 / T4: cross-platform UTM funnel dashboard.
+app.use("/api/affiliate/funnel", authLimiter, funnelRouter);
 
 app.use(errorHandler);
 
