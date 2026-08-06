@@ -26,6 +26,12 @@ const SelfRegisterSchema = z.object({
   consent_confirmed: z.boolean().refine((v) => v === true, {
     message: "consent_confirmed must be true",
   }),
+  // KOL's UI locale at registration time (5 shipping languages).
+  // Persisted to affiliate.promoters.preferred_locale so the
+  // notification pipeline + future magic-link locale detection can
+  // default to the right language. Optional with 'en' fallback so
+  // legacy callers and integration tests stay green.
+  preferredLocale: z.enum(["en", "zh", "ar", "ru", "es"]).optional(),
 });
 
 /** Extract client IP for e-signature evidence. CF-Connecting-IP first
@@ -245,6 +251,7 @@ export async function selfRegister(req: Request, res: Response) {
     p_aa_template_id: aaTemplate.id,
     p_signed_ip: extractClientIp(req),
     p_signed_ua: req.get("user-agent") ?? null,
+    p_locale: body.preferredLocale ?? "en",
   });
 
   if (error) {
