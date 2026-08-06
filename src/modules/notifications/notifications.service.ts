@@ -1,5 +1,8 @@
 import { env } from "../../config.js";
 import { logger } from "../../utils/logger.js";
+import { supabase } from "../../config.js";
+
+type SupportedLocale = "en" | "zh" | "ar" | "ru" | "es";
 
 /**
  * Email notifications via Resend (REST API, no SDK dependency).
@@ -87,14 +90,87 @@ export async function notifyKolCommissionPaid(kol: {
   email: string;
   amount: number;
   currency: string;
+  promoterId?: string;
 }): Promise<void> {
-  await notifyKol(
-    kol.email,
-    "Your LinkChinaMed commission has been paid",
-    `<p>Hi,</p>
-     <p>Your commission of <b>${kol.currency} ${kol.amount.toFixed(2)}</b> has been paid out to your Stripe account.</p>
-     <p>View details at <a href="https://affiliate.linkchinamed.com/dashboard">your dashboard</a>.</p>`,
-  );
+  const locale: SupportedLocale = await resolvePromoterLocale(kol.promoterId ?? null);
+  const { subject, body } = commissionPaidCopy(locale, kol.currency, kol.amount);
+  await notifyKol(kol.email, subject, body);
+}
+
+/**
+ * Read preferred_locale for the promoter (i18n Task #7). Falls back to
+ * 'en' on any error so a missing column or RLS hiccup never blocks a
+ * notification — notifications are best-effort by design (see top of
+ * this file). Returning the narrow SupportedLocale union keeps
+ * downstream switch statements exhaustive.
+ */
+async function resolvePromoterLocale(promoterId: string | null): Promise<SupportedLocale> {
+  if (!promoterId) return "en";
+  try {
+    const { data, error } = await supabase
+      .from("affiliate.promoters" as never)
+      .select("preferred_locale")
+      .eq("id", promoterId)
+      .maybeSingle();
+    if (error || !data) return "en";
+    const v = (data as { preferred_locale?: string }).preferred_locale;
+    if (v === "en" || v === "zh" || v === "ar" || v === "ru" || v === "es") return v;
+    return "en";
+  } catch {
+    return "en";
+  }
+}
+
+/**
+ * Inline copy table. Keep small + explicit: only locales we actually
+ * intend to ship. When the broader notification_templates system grows
+ * (separate table) we delete this and look up by (trigger, locale).
+ */
+function commissionPaidCopy(
+  locale: SupportedLocale,
+  currency: string,
+  amount: number,
+): { subject: string; body: string } {
+  const amountStr = `${currency} ${amount.toFixed(2)}`;
+  const dashboardUrl = "https://affiliate.linkchinamed.com/dashboard";
+  switch (locale) {
+    case "zh":
+      return {
+        subject: "您的 LinkChinaMed 佣金已支付",
+        body: `<p>您好,</p>
+           <p>您的佣金 <b>${amountStr}</b> 已支付至您的 Stripe 账户。</p>
+           <p>请到 <a href="${dashboardUrl}">控制台</a> 查看详情。</p>`,
+      };
+    case "ar":
+      return {
+        subject: "تم دفع عمولة LinkChinaMed الخاصة بك",
+        body: `<p>مرحبًا,</p>
+           <p>تم دفع عمولتك البالغة <b>${amountStr}</b> إلى حساب Stripe الخاص بك.</p>
+           <p>عرض التفاصيل على <a href="${dashboardUrl}">لوحة التحكم</a>.</p>`,
+      };
+    case "ru":
+      return {
+        subject: "Ваша комиссия LinkChinaMed выплачена",
+        body: `<p>Здравствуйте,</p>
+           <p>Ваша комиссия <b>${amountStr}</b> переведена на ваш Stripe-аккаунт.</p>
+           <p>Подробности на <a href="${dashboardUrl}">панели управления</a>.</p>`,
+      };
+    case "es":
+      return {
+        subject: "Tu comisión de LinkChinaMed ha sido pagada",
+        body: `<p>Hola,</p>
+           <p>Tu comisión de <b>${amountStr}</b> ha sido transferida a tu cuenta de Stripe.</p>
+           <p>Ver detalles en <a href="${dashboardUrl}">tu panel</a>.</p>`,
+      };
+    case "en":
+    default:
+      return {
+        subject: "Your LinkChinaMed commission has been paid",
+        body: `<p>Hi,</p>
+           <p>Your commission of <b>${amountStr}</b> has been paid out to your Stripe account.</p>
+           <p>View details at <a href="${dashboardUrl}">your dashboard</a>.</p>`,
+      };
+  }
 }
 
 export async function notifyAdminPayoutFailure(details: {
