@@ -112,6 +112,49 @@ export async function getMe(req: Request, res: Response) {
   res.json({ data: profile });
 }
 
+/**
+ * GET /me/dashboard — aggregate endpoint to fetch all overview data in one shot.
+ * This prevents the client from firing 6 concurrent requests, which hits rate limits
+ * and causes slow perceived loading times due to browser connection limits.
+ */
+export async function getDashboardAggregate(req: Request, res: Response) {
+  const promoterId = req.promoter?.id;
+  if (!promoterId) {
+    res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing promoter context" } });
+    return;
+  }
+
+  // Run all queries concurrently on the server
+  const [resProfile, resStats, resCodes, resPayouts, resStripe, resTax] = await Promise.all([
+    supabase.rpc("affiliate_get_me", { p_promoter_id: promoterId }),
+    supabase.rpc("affiliate_get_my_stats", { p_promoter_id: promoterId }),
+    supabase.rpc("affiliate_get_my_codes", { p_promoter_id: promoterId }),
+    supabase.rpc("affiliate_get_my_payouts", { p_promoter_id: promoterId }),
+    affiliateSupabase.from("promoters").select("stripe_account_id, stripe_onboarding_completed").eq("id", promoterId).single(),
+    affiliateSupabase.from("tax_forms").select("id, form_type, signer_name, status, submitted_at, updated_at").eq("promoter_id", promoterId).maybeSingle()
+  ]);
+
+  const profile = resProfile.data
+    ? { ...(resProfile.data as Record<string, unknown>), status: (resProfile.data as any).status ?? req.promoter?.status ?? null }
+    : null;
+
+  const stripeData = {
+    connected: !!resStripe.data?.stripe_account_id,
+    payoutsEnabled: !!resStripe.data?.stripe_onboarding_completed,
+  };
+
+  res.json({
+    data: {
+      profile,
+      stats: resStats.data ?? { totalPaid: 0, totalPending: 0, totalApproved: 0, totalClicks: 0, activeCodes: 0 },
+      codes: resCodes.data ?? [],
+      payouts: resPayouts.data ?? [],
+      stripeStatus: stripeData,
+      taxForm: resTax.data ?? null,
+    }
+  });
+}
+
 // Fields a KOL may update on their own profile. Email is deliberately
 // excluded: kol-auth matches identity by auth_user_id / email — changing
 // it would orphan the account (or hijack another promoter's row).

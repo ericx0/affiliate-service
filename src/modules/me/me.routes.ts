@@ -10,6 +10,7 @@ import {
   createMyCode,
   submitMyTaxForm,
   getMyTaxForm,
+  getDashboardAggregate,
 } from "./me.controller.js";
 import {
   postMyStripeConnect,
@@ -45,3 +46,4 @@ meRouter.post("/stripe-connect", postMyStripeConnect);
 meRouter.get("/analytics", getMyAnalytics);
 meRouter.get("/tax-docs", getMyTaxDocs);
 meRouter.get("/commission-projection", getMyProjection);
+meRouter.get("/dashboard-aggregate", getDashboardAggregate);
