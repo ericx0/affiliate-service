@@ -1,9 +1,10 @@
 import { Request, Response } from "express";
 import { z } from "zod";
-import { stripe, affiliateSupabase, supabase, env } from "../../config.js";
+import { stripe, affiliateSupabase, supabase } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { writeAuditLog } from "./audit.service.js";
 import { internalError } from "../../utils/controller-error.js";
+import { settingsStripeReturnUrl } from "../portal-urls.js";
 
 const adminCtx = (req: Request) => {
   const u = (req as any).adminUser;
@@ -99,7 +100,7 @@ export async function postStripeReset(req: Request, res: Response) {
 
   const { data: promoter, error: pErr } = await affiliateSupabase
     .from("promoters")
-    .select("id, email, stripe_account_id, stripe_onboarding_completed")
+    .select("id, email, stripe_account_id, stripe_onboarding_completed, role")
     .eq("id", promoterId)
     .maybeSingle();
 
@@ -118,15 +119,14 @@ export async function postStripeReset(req: Request, res: Response) {
     });
   }
 
-  const baseUrl =
-    env.PORTAL_URL || env.WEB_URL || "https://affiliate.linkchinamed.com";
+  const role = (promoter.role === "agent" ? "agent" : "kol");
 
   let link;
   try {
     link = await stripe.accountLinks.create({
       account: promoter.stripe_account_id,
-      refresh_url: `${baseUrl}/dashboard/settings/stripe?refresh=true`,
-      return_url: `${baseUrl}/dashboard/settings/stripe?return=true`,
+      refresh_url: `${settingsStripeReturnUrl(role)}?refresh=true`,
+      return_url: `${settingsStripeReturnUrl(role)}?return=true`,
       type: "account_onboarding",
     });
   } catch (stripeErr) {
