@@ -3,6 +3,85 @@ import Stripe from "stripe";
 import { stripe, supabase, affiliateSupabase, env } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { notifyAdminDispute, notifyAdminPayoutFailure } from "../notifications/notifications.service.js";
+import { calculateRefundDeduction } from "../commissions/refund-helpers.js";
+import { writeAuditLog } from "../admin/audit.service.js";
+
+// Sentinel UUID for audit rows written by the Stripe webhook (no human
+// actor — must satisfy NOT NULL UUID on audit_logs.target_id and actor_id).
+const SYSTEM_WEBHOOK_ACTOR_ID = "00000000-0000-0000-0000-000000000001";
+
+// Task 1.1 (PR-1): safe-mode switch for paid-commission refund reversal.
+// When true, skip Stripe transfer.createReversal + DB status flip and
+// only log an audit row. Ops flips to false after ≥3 days of dry_run
+// confirms cumulative math is correct on production traffic.
+const isRefundReverseDryRun = process.env.REFUND_REVERSE_DRY_RUN === "true";
+
+async function reversePaidCommission(commissionId: string): Promise<void> {
+  const { data: comm } = await affiliateSupabase
+    .from("commissions")
+    .select("id, status, commission_amount, cumulative_refunded_amount, stripe_transfer_id, order_id")
+    .eq("id", commissionId)
+    .single();
+  if (!comm || comm.status !== "paid") return;
+
+  const { data: order } = await affiliateSupabase
+    .from("orders")
+    .select("id, refund_amount, original_amount")
+    .eq("id", comm.order_id)
+    .single();
+  if (!order) return;
+
+  const alreadyRefunded = Number(comm.cumulative_refunded_amount ?? 0);
+  const incrementalRefund = Math.max(0, Number(order.refund_amount ?? 0) - alreadyRefunded);
+  if (incrementalRefund === 0) return;
+
+  const { deductAmount } = calculateRefundDeduction({
+    orderAmount: Number(order.original_amount),
+    commissionAmount: Number(comm.commission_amount),
+    refundAmount: incrementalRefund,
+  });
+
+  if (isRefundReverseDryRun) {
+    await writeAuditLog({
+      actorId: SYSTEM_WEBHOOK_ACTOR_ID,
+      actorEmail: "system@stripe-webhook",
+      action: "commission_reverse",
+      targetType: "commission",
+      targetId: commissionId,
+      afterState: { deduct_amount: deductAmount, mode: "dry_run" },
+      reason: `REFUND_REVERSE_DRY_RUN=true; incremental_refund=${incrementalRefund}c`,
+    });
+    logger.info({ commissionId, deductAmount }, "DRY_RUN reverse commission");
+    return;
+  }
+
+  if (comm.stripe_transfer_id) {
+    await stripe.transfers.createReversal(comm.stripe_transfer_id, { amount: deductAmount });
+  }
+
+  const newCumulative = alreadyRefunded + deductAmount;
+  const isFullyReversed = newCumulative >= Number(comm.commission_amount);
+
+  await affiliateSupabase
+    .from("commissions")
+    .update({
+      cumulative_refunded_amount: newCumulative,
+      status: isFullyReversed ? "reversed" : comm.status,
+      reversed_at: isFullyReversed ? new Date().toISOString() : null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", commissionId);
+
+  await writeAuditLog({
+    actorId: SYSTEM_WEBHOOK_ACTOR_ID,
+    actorEmail: "system@stripe-webhook",
+    action: "commission_reverse",
+    targetType: "commission",
+    targetId: commissionId,
+    afterState: { deduct_amount: deductAmount, mode: "live" },
+    reason: `incremental_refund=${incrementalRefund}c`,
+  });
+}
 
 export async function handleStripeWebhook(req: Request, res: Response) {
   const sig = req.headers["stripe-signature"];
@@ -159,6 +238,22 @@ export async function handleStripeWebhook(req: Request, res: Response) {
           { accountId: account.id },
           "KOL deauthorized Stripe Connect; promoter auto-suspended",
         );
+        break;
+      }
+
+      // Task 1.1 (PR-1): charge.refunded lands here from the Stripe
+      // dashboard webhook (refund issued outside the affiliate flow).
+      // Pull commissionId off the charge.metadata (set when the order
+      // was created), then run reversePaidCommission — which honors
+      // REFUND_REVERSE_DRY_RUN.
+      case "charge.refunded": {
+        const charge = event.data.object as Stripe.Charge;
+        const commissionId = charge.metadata?.commissionId;
+        if (!commissionId) {
+          logger.warn({ chargeId: charge.id }, "charge.refunded missing commissionId metadata");
+          break;
+        }
+        await reversePaidCommission(commissionId);
         break;
       }
 
