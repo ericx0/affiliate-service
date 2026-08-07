@@ -354,16 +354,25 @@ export async function deleteAgent(req: Request, res: Response) {
   }
 
   // 2. Guard: recruited KOLs
-  const { count: kolCount, error: kolErr } = await affiliateSupabase.from("promoters")
-    .select("id", { count: "exact", head: true })
+  // PR-1: FK recruited_by_agent_id is now ON DELETE SET NULL, so
+  // deleting an agent with KOLs silently nulls their attribution.
+  // Require explicit ?force=true to confirm, otherwise return 409
+  // with the KOL list so the admin UI can prompt.
+  const { data: referencedKols, error: kolErr } = await affiliateSupabase.from("promoters")
+    .select("id, name, email, status")
     .eq("recruited_by_agent_id", agentId)
     .eq("role", "kol");
   if (kolErr) return internalError(res, "QUERY_FAILED", kolErr);
-  if ((kolCount ?? 0) > 0) {
-    res.status(400).json({
+  const force = String(req.query.force ?? "") === "true" || req.body?.force === true;
+  if ((referencedKols?.length ?? 0) > 0 && !force) {
+    res.status(409).json({
       error: {
-        code: "AGENT_HAS_KOLS",
-        message: `该代理旗下还有 ${kolCount} 个 KOL，请先将其 KOL 转移或删除后再删除代理。`,
+        code: "KOLS_REFERENCED",
+        message: `${referencedKols.length} KOL(s) still reference this agent. Deleting will set their recruited_by_agent_id to NULL. Pass ?force=true to confirm.`,
+      },
+      data: {
+        kolsCount: referencedKols.length,
+        kols: referencedKols,
       },
     });
     return;
