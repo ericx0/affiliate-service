@@ -8,6 +8,7 @@ import { exchangeAndStore, loadCredentials } from "./callback.js";
 import { isPlatform, isPendingReview, buildOAuthStart, verifyState, type Platform } from "./oauth.js";
 import { fetchMetrics, PlatformNotReadyError, publishPost, ReauthRequiredError } from "./publisher.js";
 import { decryptToken } from "./crypto.js";
+import { dashboardUrlFor } from "../portal-urls.js";
 
 /**
  * /api/social/* — Multi-platform OAuth + publishing.
@@ -133,28 +134,42 @@ export async function oauthCallback(req: Request, res: Response) {
   const code = String(req.query.code ?? "");
   const state = String(req.query.state ?? "");
   const errParam = String(req.query.error ?? "");
+  const verifiedEarly = verifyState(state);
+  // PR-1: derive role from the verified promoter so the redirect lands
+  // on the role-specific publish/accounts page. The OAuth callback is
+  // unauthenticated (no req.promoter), so we look up by verified id.
+  let role: "kol" | "agent" = "kol";
+  if (verifiedEarly) {
+    const { data: p } = await affiliateSupabase
+      .from("promoters")
+      .select("role")
+      .eq("id", verifiedEarly.promoterId)
+      .maybeSingle();
+    if (p?.role === "agent") role = "agent";
+  }
+  const dashboardBase = dashboardUrlFor(role);
+
   if (errParam) {
     return res.redirect(
-      `${env.PORTAL_URL || env.APP_URL}/${localeOf(req)}/dashboard/publish/accounts?error=${encodeURIComponent(errParam)}`,
+      `${dashboardBase}/${localeOf(req)}/publish/accounts?error=${encodeURIComponent(errParam)}`,
     );
   }
   if (!code || !state) return badRequest(res, "MISSING_CODE", "Missing OAuth code/state");
 
-  const verified = verifyState(state);
-  if (!verified) return badRequest(res, "BAD_STATE", "Invalid or expired state token");
+  if (!verifiedEarly) return badRequest(res, "BAD_STATE", "Invalid or expired state token");
 
-  const callbackUrl = `${env.PORTAL_URL || env.APP_URL}/api/social/oauth/${platform}/callback`;
+  const callbackUrl = `${env.APP_URL}/api/social/oauth/${platform}/callback`;
   try {
-    await exchangeAndStore(platform, verified.promoterId, code, callbackUrl);
+    await exchangeAndStore(platform, verifiedEarly.promoterId, code, callbackUrl);
   } catch (err) {
     logger.error({ err: (err as Error).message, platform }, "oauth exchange failed");
     return res.redirect(
-      `${env.PORTAL_URL || env.APP_URL}/${localeOf(req)}/dashboard/publish/accounts?error=exchange_failed`,
+      `${dashboardBase}/${localeOf(req)}/publish/accounts?error=exchange_failed`,
     );
   }
 
   res.redirect(
-    `${env.PORTAL_URL || env.APP_URL}/${localeOf(req)}/dashboard/publish/accounts?connected=${platform}`,
+    `${dashboardBase}/${localeOf(req)}/publish/accounts?connected=${platform}`,
   );
 }
 
