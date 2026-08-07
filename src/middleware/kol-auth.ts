@@ -30,6 +30,48 @@ const adminSupabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_K
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
+// ---------------------------------------------------------------------------
+// In-process auth cache (30-second TTL).
+//
+// The dashboard fires 6 parallel API requests on every load. Each would
+// normally trigger:
+//   1. adminSupabase.auth.getUser(jwt)   — Supabase Auth network round-trip
+//   2. promoters table lookup             — Supabase DB network round-trip
+//
+// With the cache all requests that share the same JWT within the TTL window
+// are served from memory (< 1 ms) after the first resolution.
+// ---------------------------------------------------------------------------
+interface CacheEntry {
+  kolUser: { id: string; email: string };
+  promoter: Promoter;
+  expiresAt: number;
+}
+
+const AUTH_CACHE_TTL_MS = 30_000; // 30 seconds
+const authCache = new Map<string, CacheEntry>();
+
+function getCached(jwt: string): CacheEntry | null {
+  const entry = authCache.get(jwt);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    authCache.delete(jwt);
+    return null;
+  }
+  return entry;
+}
+
+function setCache(jwt: string, kolUser: { id: string; email: string }, promoter: Promoter) {
+  // Evict oldest entries when the cache grows too large (safety valve).
+  if (authCache.size > 500) {
+    const now = Date.now();
+    for (const [key, val] of authCache) {
+      if (now > val.expiresAt) authCache.delete(key);
+    }
+  }
+  authCache.set(jwt, { kolUser, promoter, expiresAt: Date.now() + AUTH_CACHE_TTL_MS });
+}
+
+
 export interface Promoter {
   id: string;
   email: string;
@@ -96,6 +138,19 @@ export const kolJwtMiddleware: RequestHandler = async (req, res, next) => {
 };
 
 export const kolAuthMiddleware: RequestHandler = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  const jwt = authHeader?.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
+
+  // Fast path: cache hit — attach cached identity and skip all network calls.
+  if (jwt) {
+    const cached = getCached(jwt);
+    if (cached) {
+      req.promoter = cached.promoter;
+      req.kolUser = cached.kolUser;
+      return next();
+    }
+  }
+
   const user = await verifyKolJwt(req, res);
   if (!user) return;
 
@@ -148,5 +203,9 @@ export const kolAuthMiddleware: RequestHandler = async (req, res, next) => {
 
   req.promoter = promoter as Promoter;
   req.kolUser = { id: user.id, email: user.email };
+
+  // Store in cache so parallel / subsequent requests skip the network round-trips.
+  if (jwt) setCache(jwt, req.kolUser, req.promoter);
+
   next();
 };
