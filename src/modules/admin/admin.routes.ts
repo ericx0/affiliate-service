@@ -18,7 +18,7 @@ import {
   getDashboardStats,
   getFunnel,
 } from "./admin.controller.js";
-import { listAgents, listAgentKols } from "./agents.controller.js";
+import { listAgents, listAgentKols, deleteAgent } from "./agents.controller.js";
 import { listFraudFlags, resolveFraudFlag } from "../fraud/fraud.admin.controller.js";
 import { getSigningsByEmail } from "./signings.controller.js";
 import { getTaxFormSignedUrl, postStripeReset } from "./kyc.controller.js";
@@ -49,6 +49,7 @@ adminRouter.post("/promoters/:id/activate", activatePromoter);
 // Agents (admin view: list agents + their recruited KOLs)
 adminRouter.get("/agents", listAgents);
 adminRouter.get("/agents/:agentId/kols", listAgentKols);
+adminRouter.delete("/agents/:agentId", deleteAgent);
 
 // Codes
 adminRouter.get("/codes", listCodes);

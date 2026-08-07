@@ -182,10 +182,12 @@ export async function getPromoter(req: Request, res: Response) {
 }
 
 const UpdatePromoterSchema = z.object({
-  commission_rate: z.number().min(0).max(50).optional(),
+  // Admin 调整 KOL 佣金率范围 1-10%（与代理面板保持一致）。
+  commission_rate: z.number().min(1).max(10).optional(),
   commission_type: z.enum(["standard", "override"]).optional(),
   override_reason: z.string().optional(),
   status: z.enum(["active", "suspended", "blacklisted"]).optional(),
+  agent_level: z.enum(["basic", "senior", "regional"]).optional(),
 });
 
 export async function updatePromoter(req: Request, res: Response) {
@@ -203,6 +205,7 @@ export async function updatePromoter(req: Request, res: Response) {
     p_override_reason: updates.override_reason ?? null,
     p_status: updates.status ?? null,
     p_actor_id: ctx.adminId,
+    p_agent_level: updates.agent_level ?? null,
   });
 
   if (error) return internalError(res, "UPDATE_FAILED", error);

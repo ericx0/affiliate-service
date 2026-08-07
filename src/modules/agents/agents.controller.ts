@@ -13,7 +13,7 @@ const CreateKolSchema = z.object({
   brand_name: z.string().optional(),
   phone: z.string().optional(),
   bio: z.string().optional(),
-  commission_rate: z.number().min(0).max(50).optional(), // defaults to 10.00 in RPC
+  commission_rate: z.number().min(1).max(10).optional(), // defaults to 10.00 in RPC; range 1-10%
 });
 
 interface CommissionTotal {
@@ -386,7 +386,7 @@ export async function activateKol(req: Request, res: Response) {
 }
 
 const UpdateKolSchema = z.object({
-  commission_rate: z.number().min(0).max(50).optional(),
+  commission_rate: z.number().min(1).max(10).optional(),
   primary_platform: z.string().optional(),
   primary_platform_url: z.string().url().optional(),
   brand_name: z.string().optional(),
