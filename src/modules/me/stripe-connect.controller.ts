@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { stripe, affiliateSupabase, env } from "../../config.js";
+import { settingsStripeReturnUrl } from "../portal-urls.js";
 
 /**
  * POST /me/stripe-connect
@@ -55,7 +56,7 @@ export async function postMyStripeConnect(req: Request, res: Response) {
       .eq("id", promoter.id);
     res.json({
       data: {
-        url: `/dev/stripe-mock?account=${mockAccountId}&return=/dashboard/settings/stripe`,
+        url: `/dev/stripe-mock?account=${mockAccountId}&return=${encodeURIComponent(settingsStripeReturnUrl(p?.role || "kol"))}`,
         mode: "dev-mock",
         accountId: mockAccountId,
       },
@@ -102,12 +103,10 @@ export async function postMyStripeConnect(req: Request, res: Response) {
     }
 
     // 2. Create one-time account-link for onboarding / login
-    const baseUrl =
-      env.PORTAL_URL || env.WEB_URL || "https://affiliate.linkchinamed.com";
     const link = await stripe.accountLinks.create({
       account: accountId,
-      refresh_url: `${baseUrl}/dashboard/settings/stripe?refresh=true`,
-      return_url: `${baseUrl}/dashboard/settings/stripe?return=true`,
+      refresh_url: `${settingsStripeReturnUrl(p?.role || "kol")}?refresh=true`,
+      return_url: `${settingsStripeReturnUrl(p?.role || "kol")}?return=true`,
       type: "account_onboarding",
     });
 
