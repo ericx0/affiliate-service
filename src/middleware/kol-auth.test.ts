@@ -29,19 +29,35 @@ vi.mock("../config.js", () => ({
     NODE_ENV: "test",
   },
   // Fallback lookup path (by email) — unused when the auth_user_id
-  // lookup succeeds, but must exist.
+  // lookup succeeds, but must exist. PR-1: also rejects role='agent'
+  // here so a row that slips through auth_user_id lookup still cannot
+  // reach a KOL route.
   supabase: {
-    rpc: async () => ({ data: state.promoter ? [state.promoter] : [], error: null }),
+    rpc: async () => {
+      if (state.promoter && state.promoter.role === "agent") {
+        return { data: [], error: null };
+      }
+      return { data: state.promoter ? [state.promoter] : [], error: null };
+    },
   },
   affiliateSupabase: {
     from: (table: string) => {
       if (table !== "promoters") throw new Error("unmocked table " + table);
+      // Build a chainable mock that supports any number of `.eq(...)` calls
+      // before `.maybeSingle()` / `.single()`. The PR-1 role gate adds a
+      // second `.eq("role", "kol")` after `.eq("auth_user_id", user.id)`.
+      const chain: any = {};
+      chain.eq = () => chain;
+      chain.maybeSingle = async () => {
+        // Simulate the DB role filter: role='agent' rows are invisible here.
+        if (state.promoter && state.promoter.role === "agent") {
+          return { data: null, error: null };
+        }
+        return { data: state.promoter, error: null };
+      };
+      chain.single = async () => ({ data: state.promoter, error: null });
       return {
-        select: () => ({
-          eq: () => ({
-            maybeSingle: async () => ({ data: state.promoter, error: null }),
-          }),
-        }),
+        select: () => chain,
       };
     },
   },
@@ -127,5 +143,24 @@ describe("kolAuthMiddleware — review-status gate", () => {
     await kolAuthMiddleware(req, res, next);
     expect(next).not.toHaveBeenCalled();
     expect(res.statusCode).toBe(401);
+  });
+});
+
+describe("kolAuthMiddleware role gate", () => {
+  it("rejects a role='agent' promoter with 403 NOT_A_KOL", async () => {
+    state.promoter = {
+      id: "p1",
+      email: "agent@example.com",
+      status: "active",
+      role: "agent",
+    };
+    // Use a fresh JWT so the in-process auth cache (TTL 30s) does not
+    // hand back a previous test's cached KOL row.
+    const { req, res, next } = makeReqRes();
+    req.headers.authorization = "Bearer role-gate-jwt";
+    await kolAuthMiddleware(req, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(403);
+    expect(res.body.error.code).toBe("NOT_A_KOL");
   });
 });

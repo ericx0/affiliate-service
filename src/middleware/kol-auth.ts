@@ -22,7 +22,7 @@ import { logger } from "../utils/logger.js";
  *
  * Differs from admin-auth.ts in:
  *  - No 2FA requirement (KOL accounts don't have 2FA)
- *  - No role check — any signed-in user with a matching promoter row passes
+ *  - Role check: rejects role='agent' promoters (see test 'rejects an agent')
  *  - Email-only identity (no auth_user_id linkage exists in schema)
  */
 
@@ -162,6 +162,7 @@ export const kolAuthMiddleware: RequestHandler = async (req, res, next) => {
   const { data: promoterByAuthId } = await affiliateSupabase.from("promoters")
     .select("*")
     .eq("auth_user_id", user.id)
+    .eq("role", "kol")           // PR-1: defend against role='agent' promoters reaching KOL routes
     .maybeSingle();
   let promoterRows: unknown[] | null = promoterByAuthId
     ? [promoterByAuthId]
