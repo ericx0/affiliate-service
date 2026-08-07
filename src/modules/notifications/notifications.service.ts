@@ -1,6 +1,7 @@
 import { env } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { supabase } from "../../config.js";
+import { dashboardUrlFor } from "../portal-urls.js";
 
 type SupportedLocale = "en" | "zh" | "ar" | "ru" | "es";
 
@@ -91,9 +92,10 @@ export async function notifyKolCommissionPaid(kol: {
   amount: number;
   currency: string;
   promoterId?: string;
+  role?: "kol" | "agent";
 }): Promise<void> {
   const locale: SupportedLocale = await resolvePromoterLocale(kol.promoterId ?? null);
-  const { subject, body } = commissionPaidCopy(locale, kol.currency, kol.amount);
+  const { subject, body } = commissionPaidCopy(locale, kol.currency, kol.amount, kol.role ?? "kol");
   await notifyKol(kol.email, subject, body);
 }
 
@@ -130,9 +132,10 @@ function commissionPaidCopy(
   locale: SupportedLocale,
   currency: string,
   amount: number,
+  role: "kol" | "agent" = "kol",
 ): { subject: string; body: string } {
   const amountStr = `${currency} ${amount.toFixed(2)}`;
-  const dashboardUrl = "https://affiliate.linkchinamed.com/dashboard";
+  const dashboardUrl = dashboardUrlFor(role);
   switch (locale) {
     case "zh":
       return {
