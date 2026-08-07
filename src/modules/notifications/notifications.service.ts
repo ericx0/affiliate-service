@@ -1,7 +1,8 @@
 import { env } from "../../config.js";
 import { logger } from "../../utils/logger.js";
-import { supabase } from "../../config.js";
+import { supabase, affiliateSupabase } from "../../config.js";
 import { dashboardUrlFor } from "../portal-urls.js";
+import { writeAuditLog } from "../admin/audit.service.js";
 
 type SupportedLocale = "en" | "zh" | "ar" | "ru" | "es";
 
@@ -262,4 +263,141 @@ export async function notifyAgentWelcome(agent: {
        <li>分享给 KOL，他们在注册时即绑定到您名下。</li>
      </ol>`,
   );
+}
+
+// ---- Admin-triggered resend (Task 1.4) ----
+
+const RESEND_DEBOUNCE_MS = 60_000;
+
+/**
+ * Errors thrown by resendAgentInvite carry a `code` field so the route
+ * layer can map them to HTTP status codes without leaking the message
+ * to the client in the 5xx path.
+ */
+export class ResendError extends Error {
+  code: string;
+  httpStatus: number;
+  constructor(code: string, message: string, httpStatus: number) {
+    super(message);
+    this.code = code;
+    this.httpStatus = httpStatus;
+  }
+}
+
+/**
+ * Admin-triggered manual resend of the agent welcome email.
+ *
+ * - Looks up the agent promoter (role='agent'); 404 if missing.
+ * - 60s debounce on (promoter_id, category='agent_invite') to prevent
+ *   button-mash. Recent send → 429 RESEND_TOO_SOON.
+ * - Generates a fresh recovery action_link so the agent can set their
+ *   password if needed. Best-effort: generateLink failure is swallowed
+ *   and notifyAgentWelcome is called with actionLink=null (the welcome
+ *   email copy falls back to "ask your admin to reset").
+ * - Reuses notifyAgentWelcome (bilingual EN+zh HTML, no plaintext
+ *   password). The Resend call inside notifyAgentWelcome is itself
+ *   best-effort — Resend 4xx/5xx is logged via sendEmail's logger.error
+ *   but does not bubble; the affiliate_email_sends + audit_log rows are
+ *   still written to record the operator's intent.
+ * - Writes affiliate_email_sends (template_id=NULL — welcome email is
+ *   not a row in email_templates) and audit_log row for ops traceability.
+ */
+export async function resendAgentInvite(args: {
+  promoterId: string;
+  actorId: string;
+  actorEmail?: string;
+}): Promise<{ ok: true; emailSent: boolean }> {
+  // 1. Lookup agent.
+  const { data: agent, error: agentErr } = await affiliateSupabase
+    .from("promoters")
+    .select("id, name, email, agent_invite_code, preferred_locale, role")
+    .eq("id", args.promoterId)
+    .eq("role", "agent")
+    .maybeSingle();
+  if (agentErr) {
+    logger.error({ err: agentErr, promoterId: args.promoterId }, "resendAgentInvite: agent lookup failed");
+    throw new ResendError("AGENT_LOOKUP_FAILED", "Agent lookup failed", 500);
+  }
+  if (!agent) {
+    throw new ResendError("AGENT_NOT_FOUND", `Agent ${args.promoterId} not found`, 404);
+  }
+
+  // 2. Debounce: last send within 60s → 429.
+  const { data: lastSend } = await affiliateSupabase
+    .from("affiliate_email_sends")
+    .select("created_at")
+    .eq("promoter_id", agent.id)
+    .eq("category", "agent_invite")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (lastSend?.created_at) {
+    const elapsedMs = Date.now() - new Date(lastSend.created_at).getTime();
+    if (elapsedMs < RESEND_DEBOUNCE_MS) {
+      throw new ResendError(
+        "RESEND_TOO_SOON",
+        `Last send was ${Math.round(elapsedMs / 1000)}s ago; debounce ${RESEND_DEBOUNCE_MS / 1000}s`,
+        429,
+      );
+    }
+  }
+
+  // 3. Generate recovery action link (best-effort).
+  let actionLink: string | null = null;
+  try {
+    const { data: linkData, error: linkErr } = await supabase.auth.admin.generateLink({
+      type: "recovery",
+      email: agent.email,
+    });
+    if (!linkErr && linkData?.properties?.action_link) {
+      actionLink = linkData.properties.action_link;
+    }
+  } catch (e) {
+    logger.error(
+      { error: (e as Error).message, email: agent.email },
+      "resendAgentInvite: generateLink threw; sending without action link",
+    );
+  }
+
+  // 4. Send welcome email via existing pipeline (best-effort; never throws).
+  await notifyAgentWelcome({
+    name: agent.name,
+    email: agent.email,
+    inviteCode: agent.agent_invite_code ?? "",
+    actionLink,
+  });
+
+  // 5. Audit row in affiliate_email_sends (template_id NULL: welcome email
+  //    is hardcoded HTML, not from email_templates).
+  const { error: insertErr } = await affiliateSupabase
+    .from("affiliate_email_sends")
+    .insert({
+      promoter_id: agent.id,
+      template_id: null,
+      to_email: agent.email,
+      category: "agent_invite",
+    });
+  if (insertErr) {
+    logger.error(
+      { err: insertErr, promoterId: agent.id },
+      "resendAgentInvite: affiliate_email_sends insert failed",
+    );
+  }
+
+  // 6. Operator audit log (best-effort; writeAuditLog swallows its own failures).
+  await writeAuditLog({
+    actorId: args.actorId,
+    actorEmail: args.actorEmail ?? "admin@resend-invite",
+    action: "agent_invite_resent",
+    targetType: "promoter",
+    targetId: agent.id,
+    afterState: {
+      email: agent.email,
+      debounce_ms: RESEND_DEBOUNCE_MS,
+      had_action_link: !!actionLink,
+    },
+    reason: "admin manual resend",
+  });
+
+  return { ok: true, emailSent: !!env.RESEND_API_KEY };
 }

@@ -22,6 +22,9 @@ import { listAgents, listAgentKols, deleteAgent } from "./agents.controller.js";
 import { listFraudFlags, resolveFraudFlag } from "../fraud/fraud.admin.controller.js";
 import { getSigningsByEmail } from "./signings.controller.js";
 import { getTaxFormSignedUrl, postStripeReset } from "./kyc.controller.js";
+import { resendAgentInvite } from "../notifications/notifications.service.js";
+import { logger } from "../../utils/logger.js";
+import { ResendError } from "../notifications/notifications.service.js";
 
 export const adminRouter = Router();
 
@@ -50,6 +53,33 @@ adminRouter.post("/promoters/:id/activate", activatePromoter);
 adminRouter.get("/agents", listAgents);
 adminRouter.get("/agents/:agentId/kols", listAgentKols);
 adminRouter.delete("/agents/:agentId", deleteAgent);
+
+// Resend agent invite (Task 1.4). Admin-only; 60s debounce is enforced
+// inside resendAgentInvite. The route maps ResendError.code → HTTP status
+// (404 AGENT_NOT_FOUND, 429 RESEND_TOO_SOON, 500 otherwise).
+adminRouter.post("/agents/:id/resend-invite", async (req, res) => {
+  const adminUser = (req as { adminUser?: { id?: string; email?: string } }).adminUser;
+  const actorId = adminUser?.id ?? "00000000-0000-0000-0000-000000000000";
+  const actorEmail = adminUser?.email ?? "admin@resend-invite";
+  try {
+    const result = await resendAgentInvite({
+      promoterId: req.params.id,
+      actorId,
+      actorEmail,
+    });
+    res.json(result);
+  } catch (err) {
+    if (err instanceof ResendError) {
+      res.status(err.httpStatus).json({ error: { code: err.code, message: err.message } });
+      return;
+    }
+    logger.error(
+      { err: (err as Error).message, promoterId: req.params.id },
+      "resend-invite failed",
+    );
+    res.status(500).json({ error: { code: "RESEND_FAILED", message: "Internal error" } });
+  }
+});
 
 // Codes
 adminRouter.get("/codes", listCodes);
