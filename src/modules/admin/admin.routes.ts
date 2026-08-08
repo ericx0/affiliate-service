@@ -25,6 +25,7 @@ import { getTaxFormSignedUrl, postStripeReset } from "./kyc.controller.js";
 import { resendAgentInvite } from "../notifications/notifications.service.js";
 import { logger } from "../../utils/logger.js";
 import { ResendError } from "../notifications/notifications.service.js";
+import { notificationsRouter } from "../notifications/notifications.routes.js";
 
 export const adminRouter = Router();
 
@@ -110,3 +111,6 @@ adminRouter.get("/signings", getSigningsByEmail);
 // KYC view (admin-only): signed tax-form PDF URL + Stripe onboarding reset link
 adminRouter.get("/promoters/:id/tax-form-url", getTaxFormSignedUrl);
 adminRouter.post("/promoters/:id/stripe-reset", postStripeReset);
+
+// Task 3.2: manual resend of failed affiliate_email_sends rows.
+adminRouter.use("/notifications", notificationsRouter);

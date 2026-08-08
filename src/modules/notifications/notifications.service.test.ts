@@ -11,6 +11,14 @@ const { state, mocks } = vi.hoisted(() => ({
     claimCallCount: 0,
     generateLinkResult: { data: { properties: { action_link: "https://auth.example/recovery?token=abc" } }, error: null } as any,
     fetchResult: { ok: true, status: 200 } as { ok: boolean; status: number },
+    // Task 3.2: notification_prefs opt-out map (per promoter)
+    notificationPrefs: null as null | Record<string, boolean>,
+    // Task 3.2: email_templates row lookups by (category, language)
+    templateRow: null as null | { id: string; subject: string; body: string },
+    // Task 3.2: inserts into affiliate_email_sends are recorded
+    emailSendInserts: [] as Array<Record<string, unknown>>,
+    // KOL snapshot for post-fire helper calls (only used by templated path)
+    promoterSnapshot: null as null | { id: string; email: string; name: string; preferred_locale?: string },
   },
   mocks: {
     generateLink: vi.fn(),
@@ -37,13 +45,57 @@ vi.mock("../../config.js", () => ({
     from: (table: string) => {
       if (table === "promoters") {
         return {
+          select: (cols?: string) => {
+            // The resendAgentInvite path uses chained .eq().eq().maybeSingle()
+            // and the templated path uses .eq().maybeSingle() (single eq).
+            // We dispatch on call shape via state. The notification_prefs
+            // helper does .eq("id").maybeSingle(); agent resend does
+            // .eq("id").eq("role").maybeSingle().
+            const eqChain = (...eqArgs: unknown[]) => {
+              const lastEqArgs = eqArgs as Array<[string, unknown]>;
+              const lastIsRole = lastEqArgs.length === 2 && lastEqArgs[1][0] === "role";
+              return {
+                eq: () => ({
+                  maybeSingle: async () => ({ data: state.agentRow, error: null }),
+                }),
+                maybeSingle: async () => {
+                  // notification_prefs opt-out lookup OR generic snapshot
+                  if (cols === "notification_prefs") {
+                    return { data: { notification_prefs: state.notificationPrefs }, error: null };
+                  }
+                  if (cols === "email, name") {
+                    return { data: state.promoterSnapshot, error: null };
+                  }
+                  if (lastIsRole) {
+                    return { data: state.agentRow, error: null };
+                  }
+                  return { data: state.promoterSnapshot, error: null };
+                },
+              };
+            };
+            return { eq: eqChain };
+          },
+        };
+      }
+      if (table === "email_templates") {
+        return {
           select: () => ({
             eq: () => ({
               eq: () => ({
-                maybeSingle: async () => ({ data: state.agentRow, error: null }),
+                eq: () => ({
+                  maybeSingle: async () => ({ data: state.templateRow, error: null }),
+                }),
               }),
             }),
           }),
+        };
+      }
+      if (table === "affiliate_email_sends") {
+        return {
+          insert: async (row: Record<string, unknown>) => {
+            state.emailSendInserts.push(row);
+            return { error: null };
+          },
         };
       }
       if (table === "audit_logs") {
@@ -75,7 +127,12 @@ vi.mock("../../utils/logger.js", () => ({
   logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
 }));
 
-import { resendAgentInvite } from "./notifications.service.js";
+import {
+  resendAgentInvite,
+  notifyKolCommissionPending,
+  notifyKolPayoutSent,
+  notifyKolNewReferral,
+} from "./notifications.service.js";
 
 function makeAgent(overrides: Partial<{ id: string; name: string; email: string; agent_invite_code: string; preferred_locale: string; role: string }> = {}) {
   return {
@@ -101,6 +158,15 @@ beforeEach(() => {
     data: { properties: { action_link: "https://auth.example/recovery?token=abc" } },
     error: null,
   };
+  // Task 3.2 defaults
+  state.notificationPrefs = null;
+  state.templateRow = {
+    id: "tmpl-1",
+    subject: "Hi {{name}} — {{amount}} {{currency}}",
+    body: "<p>Hi {{name}}, you earned {{amount}} {{currency}} for order {{order_id}}.</p>",
+  };
+  state.emailSendInserts = [];
+  state.promoterSnapshot = { id: "p-1", email: "kol@example.com", name: "K", preferred_locale: "en" };
   mocks.generateLink.mockImplementation(async () => state.generateLinkResult);
   fetchSpy.mockImplementation(async () => ({
     ok: state.fetchResult.ok,
@@ -234,6 +300,121 @@ describe("resendAgentInvite", () => {
     } finally {
       (await import("../../config.js")).affiliateSupabase.rpc = realRpc;
     }
+  });
+});
+
+// ---- Task 3.2: templated notifications ----
+//
+// Tests for the db-driven notifyKol* flow. The shared mock provides a
+// default template row + promoter snapshot; we override the per-test
+// state to exercise the opt-out path, the missing-template path, and
+// the retry path.
+
+describe("notifyKolCommissionPending (templated)", () => {
+  it("sends email + writes affiliate_email_sends row on success", async () => {
+    await notifyKolCommissionPending({
+      email: "kol@example.com",
+      name: "K",
+      amount: 25.5,
+      currency: "USD",
+      orderId: "order-1",
+      promoterId: "p-1",
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const body = fetchBody();
+    expect(body).toContain("kol@example.com");
+    expect(body).toContain("25.50 USD");
+    expect(body).toContain("order-1");
+
+    expect(state.emailSendInserts).toHaveLength(1);
+    const row = state.emailSendInserts[0];
+    expect(row.category).toBe("commission_pending");
+    expect(row.template_id).toBe("tmpl-1");
+    expect(row.to_email).toBe("kol@example.com");
+    expect(row.promoter_id).toBe("p-1");
+    expect(row.sent_at).toBeTruthy();
+    expect(row.last_error).toBeNull();
+  });
+
+  it("skips when notification_prefs[commission_pending] === false", async () => {
+    state.notificationPrefs = { commission_pending: false };
+
+    await notifyKolCommissionPending({
+      email: "kol@example.com",
+      name: "K",
+      amount: 25.5,
+      currency: "USD",
+      orderId: "order-1",
+      promoterId: "p-1",
+    });
+
+    // No Resend call, no log row.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(state.emailSendInserts).toHaveLength(0);
+  });
+
+  it("returns false (no log) when template row is missing", async () => {
+    state.templateRow = null;
+
+    await notifyKolCommissionPending({
+      email: "kol@example.com",
+      name: "K",
+      amount: 25.5,
+      currency: "USD",
+      orderId: "order-1",
+      promoterId: "p-1",
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(state.emailSendInserts).toHaveLength(0);
+  });
+});
+
+describe("notifyKolPayoutSent (templated)", () => {
+  it("writes last_error when all 3 Resend attempts fail", async () => {
+    // sendEmailWithRetry waits 1s + 4s between 3 attempts; vi.useFakeTimers
+    // collapses both setTimeout waits to microtasks so the test stays
+    // sub-second. The retry count + outcome are what we're asserting.
+    vi.useFakeTimers();
+    state.fetchResult = { ok: false, status: 502 };
+
+    const pending = notifyKolPayoutSent({
+      email: "kol@example.com",
+      name: "K",
+      amount: 100,
+      currency: "USD",
+      promoterId: "p-1",
+    });
+    // Drain microtasks + scheduled timers in order.
+    await vi.runAllTimersAsync();
+    await pending;
+    vi.useRealTimers();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3); // 3 attempts
+    expect(state.emailSendInserts).toHaveLength(1);
+    const row = state.emailSendInserts[0];
+    expect(row.category).toBe("payout_sent");
+    expect(row.sent_at).toBeNull();
+    expect(row.last_error).toBe("send failed after 3 attempts");
+  });
+});
+
+describe("notifyKolNewReferral (templated)", () => {
+  it("renders template with no amount/order placeholders", async () => {
+    state.templateRow = {
+      id: "tmpl-ref",
+      subject: "New referral signup",
+      body: "<p>Hi {{name}}, someone signed up via your link.</p>",
+    };
+
+    await notifyKolNewReferral({ email: "kol@example.com", name: "K", promoterId: "p-1" });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const body = fetchBody();
+    expect(body).toContain("Hi K, someone signed up via your link.");
+    expect(state.emailSendInserts).toHaveLength(1);
+    expect(state.emailSendInserts[0].category).toBe("new_referral");
   });
 });
 

@@ -404,3 +404,66 @@ export async function getMyTaxForm(req: Request, res: Response) {
   }
   res.status(200).json({ data: data ?? null });
 }
+
+// Task 3.2: per-promoter notification opt-out map. Keys are notification
+// categories (commission_pending / commission_reversed / payout_sent /
+// payout_failed / new_referral). When a key is explicitly `false` the
+// matching notifyKol* helper short-circuits and returns
+// { sent: false, skipped: 'opt_out' }.
+const NotificationPrefsSchema = z
+  .object({
+    prefs: z.record(z.string().min(1).max(64), z.boolean()),
+  })
+  .strict();
+
+/**
+ * GET /me/notification-prefs — returns the opt-out map for the KOL.
+ */
+export async function getMyNotificationPrefs(req: Request, res: Response) {
+  const promoterId = req.promoter?.id;
+  if (!promoterId) {
+    res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing promoter context" } });
+    return;
+  }
+  const { data, error } = await affiliateSupabase
+    .from("promoters" as never)
+    .select("notification_prefs")
+    .eq("id", promoterId)
+    .maybeSingle();
+  if (error) {
+    internalError(res, "QUERY_FAILED", error);
+    return;
+  }
+  const prefs = (data as { notification_prefs?: Record<string, boolean> } | null)?.notification_prefs ?? {};
+  res.status(200).json({ data: prefs });
+}
+
+/**
+ * PATCH /me/notification-prefs — merges `prefs` into the existing
+ * notification_prefs JSONB. Send `prefs: { commission_pending: false }`
+ * to opt out; the operation is additive (other keys preserved).
+ *
+ * Strict zod — unknown top-level fields are rejected.
+ */
+export async function patchMyNotificationPrefs(req: Request, res: Response) {
+  const promoterId = req.promoter?.id;
+  if (!promoterId) {
+    res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing promoter context" } });
+    return;
+  }
+  const parsed = NotificationPrefsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { code: "INVALID_INPUT", message: parsed.error.flatten() } });
+    return;
+  }
+
+  const { error } = await affiliateSupabase
+    .from("promoters" as never)
+    .update({ notification_prefs: parsed.data.prefs })
+    .eq("id", promoterId);
+  if (error) {
+    internalError(res, "UPDATE_FAILED", error);
+    return;
+  }
+  res.status(200).json({ data: parsed.data.prefs });
+}

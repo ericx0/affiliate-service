@@ -11,6 +11,8 @@ import {
   submitMyTaxForm,
   getMyTaxForm,
   getDashboardAggregate,
+  getMyNotificationPrefs,
+  patchMyNotificationPrefs,
 } from "./me.controller.js";
 import {
   postMyStripeConnect,
@@ -47,3 +49,7 @@ meRouter.get("/analytics", getMyAnalytics);
 meRouter.get("/tax-docs", getMyTaxDocs);
 meRouter.get("/commission-projection", getMyProjection);
 meRouter.get("/dashboard-aggregate", getDashboardAggregate);
+// Task 3.2: per-KOL notification opt-out (commission_pending /
+// commission_reversed / payout_sent / payout_failed / new_referral).
+meRouter.get("/notification-prefs", getMyNotificationPrefs);
+meRouter.patch("/notification-prefs", patchMyNotificationPrefs);

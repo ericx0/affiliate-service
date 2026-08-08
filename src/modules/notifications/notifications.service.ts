@@ -1,7 +1,6 @@
 import { env } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { supabase, affiliateSupabase } from "../../config.js";
-import { dashboardUrlFor } from "../portal-urls.js";
 import { writeAuditLog } from "../admin/audit.service.js";
 
 type SupportedLocale = "en" | "zh" | "ar" | "ru" | "es";
@@ -55,6 +54,23 @@ async function sendEmail(opts: {
   }
 }
 
+// 3 attempts with 4^n × 1000ms backoff (1s, 4s, 16s).
+// ponytail: no backoff lib — the helper is a 10-line for-loop. Upgrade
+// to a real jittered backoff if traffic ever makes a thundering-herd
+// retry burst observable.
+async function sendEmailWithRetry(
+  opts: { to: string; subject: string; html: string },
+  maxAttempts = 3,
+): Promise<boolean> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (await sendEmail(opts)) return true;
+    if (attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, Math.pow(4, attempt - 1) * 1000));
+    }
+  }
+  return false;
+}
+
 async function notifyAdmin(subject: string, html: string): Promise<void> {
   if (!env.ADMIN_NOTIFY_EMAIL) return;
   await sendEmail({ to: env.ADMIN_NOTIFY_EMAIL, subject, html });
@@ -88,16 +104,201 @@ export async function notifyAdminNewKol(kol: {
   );
 }
 
+/**
+ * Read a published template row from affiliate.email_templates. Returns
+ * null on any failure (network, missing row, RLS hiccup) so callers can
+ * fall back gracefully — notifications are best-effort by design.
+ */
+async function fetchTemplate(
+  category: string,
+  language: SupportedLocale,
+): Promise<{ id: string; subject: string; body: string } | null> {
+  const { data } = await affiliateSupabase
+    .from("email_templates" as never)
+    .select("id, subject, body")
+    .eq("category", category)
+    .eq("language", language)
+    .eq("is_published", true)
+    .maybeSingle();
+  return (data as { id: string; subject: string; body: string } | null) ?? null;
+}
+
+/**
+ * Replace `{{key}}` placeholders. Unknown keys are left as `{{key}}` so
+ * copy reviewers spot gaps immediately instead of silently rendering "".
+ */
+function substitute(template: string, ctx: Record<string, string>): string {
+  return template.replace(/\{\{\s*([a-zA-Z_][\w]*)\s*\}\}/g, (_m, key: string) =>
+    ctx[key] !== undefined ? ctx[key] : `{{${key}}}`,
+  );
+}
+
+type TemplatedCategory =
+  | "commission_pending"
+  | "commission_reversed"
+  | "commission_paid"
+  | "payout_sent"
+  | "payout_failed"
+  | "new_referral";
+
+interface TemplatedCtx {
+  email: string;
+  name?: string;
+  promoterId?: string;
+  amount?: number;
+  currency?: string;
+  orderId?: string;
+  reason?: string;
+}
+
+/**
+ * Shared send path for the db-templated KOL notifications. Reads the
+ * per-promoter notification_prefs opt-out map; if the category key is
+ * explicitly `false`, returns {sent: false, skipped: 'opt_out'}. Looks
+ * up the published template for the promoter's preferred_locale,
+ * substitutes {{key}} placeholders, retries the Resend call up to 3
+ * times, and records the outcome in affiliate_email_sends + audit_logs.
+ *
+ * Best-effort end-to-end: every failure is swallowed (logged + recorded
+ * in affiliate_email_sends.last_error) so the calling business flow
+ * (commission transition / payout / referral signup) is never blocked.
+ *
+ * ponytail: 1 helper for 5 wrappers. fetchTemplate is intentionally not
+ * cached — admin-published template edits should take effect immediately.
+ */
+async function sendKolTemplatedNotification(
+  category: TemplatedCategory,
+  ctx: TemplatedCtx,
+): Promise<{ sent: boolean; skipped?: "opt_out" | "no_template" }> {
+  if (!ctx.email) return { sent: false, skipped: "no_template" };
+
+  // Opt-out check (only when promoterId known).
+  if (ctx.promoterId) {
+    const { data: prefRow } = await affiliateSupabase
+      .from("promoters" as never)
+      .select("notification_prefs")
+      .eq("id", ctx.promoterId)
+      .maybeSingle();
+    const prefs = (prefRow as { notification_prefs?: Record<string, boolean> } | null)?.notification_prefs;
+    if (prefs && prefs[category] === false) {
+      logger.debug({ category, promoterId: ctx.promoterId }, "notification skipped (opt-out)");
+      return { sent: false, skipped: "opt_out" };
+    }
+  }
+
+  const locale = await resolvePromoterLocale(ctx.promoterId ?? null);
+  const tmpl = await fetchTemplate(category, locale);
+  if (!tmpl) {
+    logger.warn({ category, locale, promoterId: ctx.promoterId }, "no template found");
+    return { sent: false, skipped: "no_template" };
+  }
+
+  const subCtx: Record<string, string> = {
+    name: ctx.name ?? "",
+    amount: ctx.amount !== undefined ? ctx.amount.toFixed(2) : "",
+    currency: ctx.currency ?? "",
+    order_id: ctx.orderId ?? "",
+    reason: ctx.reason ?? "",
+  };
+  const subject = substitute(tmpl.subject, subCtx);
+  const body = substitute(tmpl.body, subCtx);
+
+  const ok = await sendEmailWithRetry({ to: ctx.email, subject, html: body });
+
+  // Log row + audit (best-effort; never throws).
+  const { error: logErr } = await affiliateSupabase
+    .from("affiliate_email_sends" as never)
+    .insert({
+      promoter_id: ctx.promoterId ?? null,
+      template_id: tmpl.id,
+      to_email: ctx.email,
+      category,
+      sent_at: ok ? new Date().toISOString() : null,
+      last_error: ok ? null : "send failed after 3 attempts",
+    } as never);
+  if (logErr) {
+    logger.error({ err: logErr, category }, "affiliate_email_sends insert failed");
+  }
+  await writeAuditLog({
+    actorId: "system",
+    actorEmail: "system@notifications",
+    action: `notification_${category}`,
+    targetType: "promoter",
+    targetId: ctx.promoterId ?? "00000000-0000-0000-0000-000000000000",
+    afterState: { email: ctx.email, ok },
+    reason: "templated notification",
+  });
+
+  return { sent: ok };
+}
+
 export async function notifyKolCommissionPaid(kol: {
   email: string;
-  amount: number;
-  currency: string;
+  name?: string;
+  amount?: number;
+  currency?: string;
   promoterId?: string;
   role?: "kol" | "agent";
 }): Promise<void> {
-  const locale: SupportedLocale = await resolvePromoterLocale(kol.promoterId ?? null);
-  const { subject, body } = commissionPaidCopy(locale, kol.currency, kol.amount, kol.role ?? "kol");
-  await notifyKol(kol.email, subject, body);
+  await sendKolTemplatedNotification("commission_paid", {
+    email: kol.email,
+    name: kol.name ?? "",
+    promoterId: kol.promoterId,
+    amount: kol.amount,
+    currency: kol.currency,
+  });
+}
+
+export async function notifyKolCommissionPending(args: {
+  email: string;
+  name?: string;
+  amount?: number;
+  currency?: string;
+  orderId?: string;
+  promoterId?: string;
+}): Promise<void> {
+  await sendKolTemplatedNotification("commission_pending", args);
+}
+
+export async function notifyKolCommissionReversed(args: {
+  email: string;
+  name?: string;
+  amount?: number;
+  currency?: string;
+  orderId?: string;
+  reason?: string;
+  promoterId?: string;
+}): Promise<void> {
+  await sendKolTemplatedNotification("commission_reversed", args);
+}
+
+export async function notifyKolPayoutSent(args: {
+  email: string;
+  name?: string;
+  amount?: number;
+  currency?: string;
+  promoterId?: string;
+}): Promise<void> {
+  await sendKolTemplatedNotification("payout_sent", args);
+}
+
+export async function notifyKolPayoutFailed(args: {
+  email: string;
+  name?: string;
+  amount?: number;
+  currency?: string;
+  reason?: string;
+  promoterId?: string;
+}): Promise<void> {
+  await sendKolTemplatedNotification("payout_failed", args);
+}
+
+export async function notifyKolNewReferral(args: {
+  email: string;
+  name?: string;
+  promoterId?: string;
+}): Promise<void> {
+  await sendKolTemplatedNotification("new_referral", args);
 }
 
 /**
@@ -125,57 +326,10 @@ async function resolvePromoterLocale(promoterId: string | null): Promise<Support
 }
 
 /**
- * Inline copy table. Keep small + explicit: only locales we actually
- * intend to ship. When the broader notification_templates system grows
- * (separate table) we delete this and look up by (trigger, locale).
+ * Inline copy table was removed in Task 3.2 — commission_paid (and the
+ * 4 other categories) now read from affiliate.email_templates via
+ * fetchTemplate + substitute. See sendKolTemplatedNotification.
  */
-function commissionPaidCopy(
-  locale: SupportedLocale,
-  currency: string,
-  amount: number,
-  role: "kol" | "agent" = "kol",
-): { subject: string; body: string } {
-  const amountStr = `${currency} ${amount.toFixed(2)}`;
-  const dashboardUrl = dashboardUrlFor(role);
-  switch (locale) {
-    case "zh":
-      return {
-        subject: "您的 LinkChinaMed 佣金已支付",
-        body: `<p>您好,</p>
-           <p>您的佣金 <b>${amountStr}</b> 已支付至您的 Stripe 账户。</p>
-           <p>请到 <a href="${dashboardUrl}">控制台</a> 查看详情。</p>`,
-      };
-    case "ar":
-      return {
-        subject: "تم دفع عمولة LinkChinaMed الخاصة بك",
-        body: `<p>مرحبًا,</p>
-           <p>تم دفع عمولتك البالغة <b>${amountStr}</b> إلى حساب Stripe الخاص بك.</p>
-           <p>عرض التفاصيل على <a href="${dashboardUrl}">لوحة التحكم</a>.</p>`,
-      };
-    case "ru":
-      return {
-        subject: "Ваша комиссия LinkChinaMed выплачена",
-        body: `<p>Здравствуйте,</p>
-           <p>Ваша комиссия <b>${amountStr}</b> переведена на ваш Stripe-аккаунт.</p>
-           <p>Подробности на <a href="${dashboardUrl}">панели управления</a>.</p>`,
-      };
-    case "es":
-      return {
-        subject: "Tu comisión de LinkChinaMed ha sido pagada",
-        body: `<p>Hola,</p>
-           <p>Tu comisión de <b>${amountStr}</b> ha sido transferida a tu cuenta de Stripe.</p>
-           <p>Ver detalles en <a href="${dashboardUrl}">tu panel</a>.</p>`,
-      };
-    case "en":
-    default:
-      return {
-        subject: "Your LinkChinaMed commission has been paid",
-        body: `<p>Hi,</p>
-           <p>Your commission of <b>${amountStr}</b> has been paid out to your Stripe account.</p>
-           <p>View details at <a href="${dashboardUrl}">your dashboard</a>.</p>`,
-      };
-  }
-}
 
 export async function notifyAdminPayoutFailure(details: {
   promoterId: string;

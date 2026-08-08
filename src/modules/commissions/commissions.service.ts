@@ -2,6 +2,10 @@ import { z } from "zod";
 import { affiliateSupabase, stripe } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import {
+  notifyKolCommissionPending,
+  notifyKolCommissionReversed,
+} from "../notifications/notifications.service.js";
+import {
   Commission,
   CommissionStatus,
   CommissionType,
@@ -164,7 +168,47 @@ export async function transition(
   }
 
   logger.info({ commissionId, to: toStatus }, "commission transitioned");
+
+  // Task 3.2: KOL email hooks on terminal-ish transitions.
+  // Fire-and-forget — the .catch() inside the helper already logs;
+  // awaiting here would block the business flow on Resend latency.
+  void fireCommissionTransitionEmail(data as Commission, toStatus);
+
   return { success: true, commission: data as Commission };
+}
+
+/**
+ * Best-effort post-transition email. Each branch is wrapped so a thrown
+ * promise (DB read / Resend 5xx) doesn't bubble up into the caller —
+ * notifications must NEVER fail a commission state change.
+ */
+async function fireCommissionTransitionEmail(
+  commission: Commission,
+  toStatus: CommissionStatus,
+): Promise<void> {
+  try {
+    if (toStatus !== "approved") return; // only commission_pending for now
+    const { data: promoter } = await affiliateSupabase
+      .from("promoters")
+      .select("email, name")
+      .eq("id", commission.promoter_id)
+      .maybeSingle();
+    const p = promoter as { email: string; name: string } | null;
+    if (!p?.email) return;
+    // commission_amount is stored in cents (BIGINT); convert to dollars
+    // for the email body per Task 3.2 convention ("amount is dollars
+    // in notification templates, no /100 math in templates").
+    await notifyKolCommissionPending({
+      email: p.email,
+      name: p.name,
+      amount: commission.commission_amount / 100,
+      currency: commission.currency,
+      orderId: commission.order_id,
+      promoterId: commission.promoter_id,
+    });
+  } catch (e) {
+    logger.error({ err: (e as Error).message, commissionId: commission.id }, "fireCommissionTransitionEmail threw");
+  }
 }
 
 /**
@@ -235,9 +279,50 @@ export async function reversePaidCommission(
       { idempotencyKey: `commission-reverse-${commissionId}-${eventId}` },
     );
     // 不自动 transition -- 调用方按累计退款决定状态(reversed 仅在累计退满时)
+
+    // Task 3.2: KOL email hook on successful reversal. Fire-and-forget;
+    // cents → dollars for the email body per Task 3.2 convention.
+    void fireReversalEmail(commission, commissionId, amount, reason).catch((e) =>
+      logger.error({ err: (e as Error).message, commissionId }, "fireReversalEmail threw"),
+    );
+
     return { success: true, commission: commission as Commission };
   } catch (err) {
     logger.error({ err, commissionId, eventId }, "failed to reverse Stripe transfer");
     return { success: false, error: (err as Error).message };
+  }
+}
+
+/**
+ * Best-effort post-reversal email. Same contract as
+ * fireCommissionTransitionEmail — the helper catches its own errors,
+ * but we wrap in fire-and-forget + a logger guard so a thrown promise
+ * here never reaches the caller of reversePaidCommission.
+ */
+async function fireReversalEmail(
+  commission: { promoter_id: string; currency: string },
+  commissionId: string,
+  amountCents: number,
+  reason: string,
+): Promise<void> {
+  try {
+    const { data: promoter } = await affiliateSupabase
+      .from("promoters")
+      .select("email, name")
+      .eq("id", commission.promoter_id)
+      .maybeSingle();
+    const p = promoter as { email: string; name: string } | null;
+    if (!p?.email) return;
+    await notifyKolCommissionReversed({
+      email: p.email,
+      name: p.name,
+      amount: amountCents / 100,
+      currency: commission.currency,
+      orderId: commissionId,
+      reason,
+      promoterId: commission.promoter_id,
+    });
+  } catch (e) {
+    logger.error({ err: (e as Error).message, commissionId }, "fireReversalEmail inner threw");
   }
 }

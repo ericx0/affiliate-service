@@ -2,6 +2,10 @@ import crypto from "node:crypto";
 import { stripe, affiliateSupabase } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { transition } from "../commissions/commissions.service.js";
+import {
+  notifyKolPayoutSent,
+  notifyKolPayoutFailed,
+} from "../notifications/notifications.service.js";
 import { groupCommissionsByPromoter, exceedsMinimum } from "./payouts.helpers.js";
 import { getOpenFlaggedCommissionIds } from "../fraud/fraud.service.js";
 
@@ -96,9 +100,24 @@ export async function paySingleCommission(commissionId: string): Promise<PayoutR
     }
 
     logger.info({ commissionId, transferId: transfer.id, amount: commission.commission_amount }, "commission paid");
+
+    // Task 3.2: KOL payout_sent hook. Fire-and-forget.
+    void firePayoutSentEmail({
+      promoterId: commission.promoter_id,
+      amount: amountCents / 100, // cents → dollars for the email
+      currency: commission.currency,
+    }).catch((e) => logger.error({ err: (e as Error).message, commissionId }, "firePayoutSentEmail threw"));
+
     return { success: true, transferId: transfer.id, totalAmount: commission.commission_amount, commissionIds: [commission.id] };
   } catch (err) {
     logger.error({ err, commissionId }, "Stripe transfer failed");
+    // Task 3.2: KOL payout_failed hook. Fire-and-forget.
+    void firePayoutFailedEmail({
+      promoterId: commission.promoter_id,
+      amount: amountCents / 100,
+      currency: commission.currency,
+      reason: (err as Error).message,
+    }).catch((e) => logger.error({ err: (e as Error).message, commissionId }, "firePayoutFailedEmail threw"));
     return { success: false, error: (err as Error).message };
   }
 }
@@ -206,6 +225,15 @@ export async function payPromoterGroup(
       },
       "promoter group payout completed",
     );
+
+    // Task 3.2: KOL payout_sent hook (one email per group, not per
+    // commission — they're bundled into a single transfer). Fire-and-forget.
+    void firePayoutSentEmail({
+      promoterId,
+      amount: totalAmount / 100,
+      currency,
+    }).catch((e) => logger.error({ err: (e as Error).message, promoterId }, "firePayoutSentEmail (group) threw"));
+
     return {
       success: true,
       transferId: transfer.id,
@@ -217,6 +245,13 @@ export async function payPromoterGroup(
       { err, promoterId, commissionIds: sortedIds },
       "Stripe group transfer failed",
     );
+    // Task 3.2: KOL payout_failed hook. Fire-and-forget.
+    void firePayoutFailedEmail({
+      promoterId,
+      amount: totalAmount / 100,
+      currency,
+      reason: (err as Error).message,
+    }).catch((e) => logger.error({ err: (e as Error).message, promoterId }, "firePayoutFailedEmail (group) threw"));
     return { success: false, error: (err as Error).message };
   }
 }
@@ -276,4 +311,62 @@ export async function payCommissions(commissionIds: string[]): Promise<PayoutRes
   }
 
   return results;
+}
+
+// ---- Task 3.2: fire-and-forget KOL payout emails ----
+//
+// Both helpers look up the promoter and call the matching notifyKol*
+// function. Each catches its own errors so a Resend hiccup never blocks
+// the calling business flow. cents → dollars is the caller's job.
+
+async function firePayoutSentEmail(args: {
+  promoterId: string;
+  amount: number;
+  currency: string;
+}): Promise<void> {
+  try {
+    const { data: p } = await affiliateSupabase
+      .from("promoters")
+      .select("email, name")
+      .eq("id", args.promoterId)
+      .maybeSingle();
+    const promoter = p as { email: string; name: string } | null;
+    if (!promoter?.email) return;
+    await notifyKolPayoutSent({
+      email: promoter.email,
+      name: promoter.name,
+      amount: args.amount,
+      currency: args.currency,
+      promoterId: args.promoterId,
+    });
+  } catch (e) {
+    logger.error({ err: (e as Error).message, promoterId: args.promoterId }, "firePayoutSentEmail inner threw");
+  }
+}
+
+async function firePayoutFailedEmail(args: {
+  promoterId: string;
+  amount: number;
+  currency: string;
+  reason: string;
+}): Promise<void> {
+  try {
+    const { data: p } = await affiliateSupabase
+      .from("promoters")
+      .select("email, name")
+      .eq("id", args.promoterId)
+      .maybeSingle();
+    const promoter = p as { email: string; name: string } | null;
+    if (!promoter?.email) return;
+    await notifyKolPayoutFailed({
+      email: promoter.email,
+      name: promoter.name,
+      amount: args.amount,
+      currency: args.currency,
+      reason: args.reason,
+      promoterId: args.promoterId,
+    });
+  } catch (e) {
+    logger.error({ err: (e as Error).message, promoterId: args.promoterId }, "firePayoutFailedEmail inner threw");
+  }
 }

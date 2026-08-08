@@ -13,6 +13,10 @@ const mockState = vi.hoisted(() => ({
 }));
 
 vi.mock("../../config.js", () => ({
+  env: {
+    LOG_LEVEL: "warn",
+    NODE_ENV: "test",
+  },
   stripe: {
     transfers: {
       create: (...args: any[]) => mockState.stripeTransfersCreate(...args),

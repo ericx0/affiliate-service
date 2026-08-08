@@ -7,6 +7,9 @@ const { state } = vi.hoisted(() => ({
     inserts: [] as Array<Record<string, any>>,
     profileRpc: null as null | { data: Record<string, any> | null; error: null },
     updateCalls: [] as Array<Record<string, any>>,
+    // Task 3.2: notification_prefs opt-out reads + updates
+    notificationPrefsRow: null as null | { notification_prefs: Record<string, boolean> },
+    notificationPrefsUpdates: [] as Array<Record<string, unknown>>,
   },
 }));
 
@@ -47,7 +50,11 @@ vi.mock("../../config.js", () => ({
       if (table === "promoters") {
         return {
           update: (row: Record<string, any>) => {
+            // The notification_prefs PATCH path also routes through
+            // promoters.update(); capture every call regardless of which
+            // column it sets so the test can assert both flows.
             state.updateCalls.push(row);
+            state.notificationPrefsUpdates.push(row);
             return {
               eq: () => ({
                 select: () => ({
@@ -71,6 +78,11 @@ vi.mock("../../config.js", () => ({
               }),
             };
           },
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () => ({ data: state.notificationPrefsRow, error: null }),
+            }),
+          }),
         };
       }
       throw new Error("unmocked table " + table);
@@ -78,7 +90,13 @@ vi.mock("../../config.js", () => ({
   },
 }));
 
-import { createMyCode, getMe, updateMe } from "./me.controller.js";
+import {
+  createMyCode,
+  getMe,
+  updateMe,
+  getMyNotificationPrefs,
+  patchMyNotificationPrefs,
+} from "./me.controller.js";
 
 function makeReqRes(status: string | undefined) {
   const req: any = {
@@ -104,6 +122,8 @@ beforeEach(() => {
   state.inserts = [];
   state.profileRpc = null;
   state.updateCalls = [];
+  state.notificationPrefsRow = null;
+  state.notificationPrefsUpdates = [];
 });
 
 describe("getMe — review-state contract", () => {
@@ -274,5 +294,61 @@ describe("PATCH /me updateMe", () => {
     await updateMe(req, res);
     expect(res.statusCode).toBe(400);
     expect(state.updateCalls).toHaveLength(0);
+  });
+});
+
+// ---- Task 3.2: /me/notification-prefs ----
+//
+// Brief requires 2 cases for PATCH (200, 400 strict). getMyNotificationPrefs
+// gets one extra case for the empty-default path so the contract is clear.
+
+describe("/me/notification-prefs", () => {
+  function makePatchPrefsReq(body: unknown) {
+    const { req, res } = makeReqRes("active");
+    req.body = body;
+    return { req, res };
+  }
+
+  it("GET returns the stored map (or {} when none)", async () => {
+    const { req, res } = makeReqRes("active");
+    state.notificationPrefsRow = { notification_prefs: { commission_pending: false } };
+    await getMyNotificationPrefs(req, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data).toEqual({ commission_pending: false });
+  });
+
+  it("GET returns {} when the row has no notification_prefs yet", async () => {
+    const { req, res } = makeReqRes("active");
+    state.notificationPrefsRow = null;
+    await getMyNotificationPrefs(req, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data).toEqual({});
+  });
+
+  it("PATCH 200 — writes prefs to the promoter row", async () => {
+    const { req, res } = makePatchPrefsReq({
+      prefs: { commission_pending: false, payout_sent: true },
+    });
+    await patchMyNotificationPrefs(req, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data).toEqual({
+      commission_pending: false,
+      payout_sent: true,
+    });
+    expect(state.notificationPrefsUpdates).toHaveLength(1);
+    expect(state.notificationPrefsUpdates[0].notification_prefs).toEqual({
+      commission_pending: false,
+      payout_sent: true,
+    });
+  });
+
+  it("PATCH 400 — rejects strict-mode violation (unknown top-level field)", async () => {
+    const { req, res } = makePatchPrefsReq({
+      prefs: { commission_pending: false },
+      sneaky: "extra",
+    });
+    await patchMyNotificationPrefs(req, res);
+    expect(res.statusCode).toBe(400);
+    expect(state.notificationPrefsUpdates).toHaveLength(0);
   });
 });
