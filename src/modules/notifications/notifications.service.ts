@@ -267,6 +267,10 @@ export async function notifyAgentWelcome(agent: {
 
 // ---- Admin-triggered resend (Task 1.4) ----
 
+// COUPLED: RESEND_DEBOUNCE_MS MUST match the SQL `interval '60 seconds'`
+// in supabase/migrations/20260813000005_claim_agent_invite_send.sql. If
+// you change one, change the other — otherwise the app will claim a
+// slot that the SQL already released (or vice versa).
 const RESEND_DEBOUNCE_MS = 60_000;
 
 /**
@@ -334,8 +338,15 @@ export async function resendAgentInvite(args: {
     );
     throw new ResendError("RESEND_CLAIM_FAILED", "Could not claim resend slot", 500);
   }
-  // rpc() returns an array; empty (or null) means debounce hit.
-  if (!claimed || (Array.isArray(claimed) && claimed.length === 0)) {
+  // rpc() must return an array (PostgREST contract for set-returning RPCs).
+  if (!Array.isArray(claimed)) {
+    logger.error(
+      { promoterId: agent.id, claimed },
+      "resendAgentInvite: claim rpc returned non-array response",
+    );
+    throw new ResendError("RESEND_CLAIM_MALFORMED", "Claim RPC returned malformed response", 500);
+  }
+  if (claimed.length === 0) {
     throw new ResendError(
       "RESEND_TOO_SOON",
       `Last send within ${RESEND_DEBOUNCE_MS / 1000}s debounce window`,

@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 const { state, mocks } = vi.hoisted(() => ({
   state: {
@@ -151,6 +153,18 @@ describe("resendAgentInvite", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("throws RESEND_CLAIM_MALFORMED when RPC returns a non-array (500, not 429)", async () => {
+    state.agentRow = makeAgent();
+    state.claimResult = null as unknown as Array<{ id: string; created_at: string }>;
+    state.claimError = null;
+
+    await expect(
+      resendAgentInvite({ promoterId: "agent-1", actorId: "admin-1" }),
+    ).rejects.toMatchObject({ code: "RESEND_CLAIM_MALFORMED" });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("propagates error when generateLink throws (non-fatal: still sends with null actionLink)", async () => {
     state.agentRow = makeAgent();
 
@@ -220,5 +234,31 @@ describe("resendAgentInvite", () => {
     } finally {
       (await import("../../config.js")).affiliateSupabase.rpc = realRpc;
     }
+  });
+});
+
+// ---- Sanity check on the SQL source ----
+//
+// The race fix lives at the SQL boundary. We mock the RPC in the tests
+// above (no local Postgres in this environment), but we MUST ensure the
+// real migration still carries the per-key advisory lock — otherwise
+// the test above silently passes against an unguarded RPC. This is a
+// cheap string check; a real integration test would require a Supabase
+// local instance.
+describe("claim_agent_invite_send migration SQL", () => {
+  const sqlPath = resolve(
+    __dirname,
+    "../../../../supabase/migrations/20260813000005_claim_agent_invite_send.sql",
+  );
+
+  it("contains pg_advisory_xact_lock (race fix must not regress)", () => {
+    const sql = readFileSync(sqlPath, "utf8");
+    expect(sql).toMatch(/pg_advisory_xact_lock/);
+  });
+
+  it("uses xact-scoped advisory lock (not session-scoped which leaks)", () => {
+    const sql = readFileSync(sqlPath, "utf8");
+    expect(sql).toMatch(/pg_advisory_xact_lock/);
+    expect(sql).not.toMatch(/pg_advisory_lock\b(?!_)/); // session-scoped lock forbidden
   });
 });
