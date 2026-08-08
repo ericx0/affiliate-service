@@ -165,7 +165,7 @@ const UpdateMeSchema = z
     primaryPlatform: z.string().min(1).max(50).optional(),
     primaryPlatformUrl: z.string().url().max(500).optional().or(z.literal("")),
     bio: z.string().max(500).optional(),
-    phone: z.string().regex(/^\+?[0-9\s\-()]{7,20}$/).optional(),
+    phone: z.string().regex(/^\+?[0-9\s\-()]{7,20}$/).max(20).optional().or(z.literal("")),
     socialAccounts: z.record(z.string().min(1).max(32), z.string().url().max(500).or(z.string().min(1).max(64))).optional(),
     preferredLocale: z.enum(["en", "zh", "ar", "ru", "es"]).optional(),
     avatarUrl: z.string().url().max(500).optional(),
@@ -197,7 +197,7 @@ export async function updateMe(req: Request, res: Response) {
   }
 
   if (parsed.data.bio !== undefined) updates.bio = parsed.data.bio;
-  if (parsed.data.phone !== undefined) updates.phone = parsed.data.phone;
+  if (parsed.data.phone !== undefined) updates.phone = parsed.data.phone || null;
   if (parsed.data.socialAccounts !== undefined) {
     if (Object.getPrototypeOf(parsed.data.socialAccounts) !== Object.prototype) {
       res.status(400).json({ error: { code: "INVALID_INPUT", message: "Invalid profile fields" } });
