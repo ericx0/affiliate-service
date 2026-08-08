@@ -289,6 +289,16 @@ export async function selfRegister(req: Request, res: Response) {
       });
       return;
     }
+    // Defense-in-depth: SQL guard (P0001 EMAIL_HAS_AGENT_ROLE) catches
+    // the same case the controller pre-check (F-NEW-5) does, but if a
+    // race or future caller bypasses the controller the RPC still
+    // returns a clean 409 instead of leaking 500.
+    if (error.code === "P0001" && error.message.includes("EMAIL_HAS_AGENT_ROLE")) {
+      res.status(409).json({
+        error: { code: "EMAIL_HAS_AGENT_ROLE", message: "This email is registered as an Agent. Use a different email for KOL signup." },
+      });
+      return;
+    }
     internalError(res, "REGISTER_FAILED", error);
     return;
   }
