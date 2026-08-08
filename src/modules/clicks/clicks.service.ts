@@ -7,6 +7,7 @@ export const ATTRIBUTION_WINDOW_DAYS = env.ATTRIBUTION_WINDOW_DAYS;
 
 const TrackClickSchema = z.object({
   referralCode: z.string().min(4).max(32),
+  source: z.enum(["link", "coupon", "qr"]).default("link"),
   // Optional: the edge middleware calls /clicks/track before any visitor
   // cookie exists, so server-side callers may not have a session id.
   // visitor_session_id is nullable in affiliate.referral_clicks.
@@ -25,6 +26,7 @@ const TrackClickSchema = z.object({
 
 export interface TrackClickInput {
   referralCode: string;
+  source?: "link" | "coupon" | "qr";
   visitorSessionId?: string;
   ipAddress?: string;
   userAgent?: string;
@@ -45,6 +47,46 @@ export interface TrackClickResult {
   reason?: string;
 }
 
+export interface AttributionConfig {
+  mode: "first_click" | "last_click";
+  windowDays: number;
+}
+
+const ATTRIBUTION_CONFIG_CACHE_MS = 60 * 60 * 1000;
+const DEFAULT_ATTRIBUTION_CONFIG: AttributionConfig = {
+  mode: "last_click",
+  windowDays: 30,
+};
+
+let cachedAttributionConfig: AttributionConfig | null = null;
+let attributionConfigExpiresAt = 0;
+
+export async function getAttributionConfig(): Promise<AttributionConfig> {
+  if (cachedAttributionConfig && Date.now() < attributionConfigExpiresAt) {
+    return cachedAttributionConfig;
+  }
+
+  const { data, error } = await affiliateSupabase
+    .from("attribution_config")
+    .select("mode, window_days")
+    .eq("scope", "global")
+    .single();
+
+  if (
+    !error &&
+    data &&
+    (data.mode === "first_click" || data.mode === "last_click") &&
+    Number.isInteger(data.window_days) &&
+    data.window_days > 0
+  ) {
+    cachedAttributionConfig = { mode: data.mode, windowDays: data.window_days };
+  } else {
+    cachedAttributionConfig = DEFAULT_ATTRIBUTION_CONFIG;
+  }
+  attributionConfigExpiresAt = Date.now() + ATTRIBUTION_CONFIG_CACHE_MS;
+  return cachedAttributionConfig;
+}
+
 /**
  * Check if a click is still within the 30-day attribution window.
  */
@@ -54,64 +96,90 @@ export function isWithinAttributionWindow(clickedAt: string): boolean {
   return elapsedMs <= windowMs;
 }
 
+interface RecentClick {
+  id: string;
+  first_click_at: string;
+  last_click_at: string;
+}
+
+async function findRecentClick(
+  input: z.infer<typeof TrackClickSchema>,
+  windowDays: number,
+): Promise<RecentClick | null> {
+  if (!input.visitorSessionId && !input.ipAddress) return null;
+
+  let query = affiliateSupabase
+    .from("referral_clicks")
+    .select("id, first_click_at, last_click_at")
+    .eq("referral_code", input.referralCode);
+  query = input.visitorSessionId
+    ? query.eq("visitor_session_id", input.visitorSessionId)
+    : query.eq("ip_address", input.ipAddress!);
+
+  const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+  const { data } = await query.gte("last_click_at", cutoff).limit(1);
+  return data?.[0] ?? null;
+}
+
+async function updateRecentClick(options: {
+  clickId: string;
+  mode: AttributionConfig["mode"];
+  source: "link" | "coupon" | "qr";
+  now: string;
+  windowEnd: string;
+}): Promise<{ message: string } | null> {
+  const timestamps = options.mode === "last_click"
+    ? { first_click_at: options.now, last_click_at: options.now, clicked_at: options.now }
+    : { last_click_at: options.now };
+  const { error } = await affiliateSupabase
+    .from("referral_clicks")
+    .update({
+      ...timestamps,
+      source: options.source,
+      attribution_window_ends_at: options.windowEnd,
+    })
+    .eq("id", options.clickId);
+  return error;
+}
+
 /**
- * Record a referral click. Validates the code and creates a click record.
- * Returns existing click if a duplicate was recorded recently (idempotency):
- * keyed on session+code when a visitor session id is present, otherwise on
- * ip+code (server-side callers without a session) — both within the last 1h.
+ * Record a referral click using the configured first/last-click mode.
  */
 export async function trackClick(input: TrackClickInput): Promise<TrackClickResult> {
   const validated = TrackClickSchema.parse(input);
-
   if (!isValidCodeFormat(validated.referralCode)) {
     return { recorded: false, reason: "Invalid code format" };
   }
 
-  // Look up promoter via code
   const { data: codeRow, error: codeErr } = await affiliateSupabase
     .from("referral_codes")
     .select("promoter_id, is_active, expires_at")
     .eq("code", validated.referralCode)
     .eq("is_active", true)
     .single();
-
   if (codeErr || !codeRow) {
     logger.info({ code: validated.referralCode }, "referral code not found or inactive");
     return { recorded: false, reason: "Code not found" };
   }
-
   if (codeRow.expires_at && new Date(codeRow.expires_at) < new Date()) {
     return { recorded: false, reason: "Code expired" };
   }
 
-  // Idempotency: skip if this visitor already clicked this code recently.
-  // Session-keyed when available; IP-keyed otherwise (edge middleware calls
-  // before any visitor cookie exists).
-  const recentCutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();  // last 1h
-  let existing: Array<{ id: string }> | null = null;
-  if (validated.visitorSessionId || validated.ipAddress) {
-    let dupQuery = affiliateSupabase
-      .from("referral_clicks")
-      .select("id")
-      .eq("referral_code", validated.referralCode);
-    if (validated.visitorSessionId) {
-      dupQuery = dupQuery.eq("visitor_session_id", validated.visitorSessionId);
-    } else {
-      dupQuery = dupQuery.eq("ip_address", validated.ipAddress!);
-    }
-    const { data } = await dupQuery
-      .gte("clicked_at", recentCutoff)
-      .limit(1);
-    existing = data;
+  const config = await getAttributionConfig();
+  const now = new Date().toISOString();
+  const windowEnd = new Date(Date.now() + config.windowDays * 24 * 60 * 60 * 1000).toISOString();
+  const existing = await findRecentClick(validated, config.windowDays);
+  if (existing) {
+    const error = await updateRecentClick({
+      clickId: existing.id,
+      mode: config.mode,
+      source: validated.source,
+      now,
+      windowEnd,
+    });
+    if (error) return { recorded: false, reason: error.message };
+    return { recorded: true, clickId: existing.id, promoterId: codeRow.promoter_id };
   }
-
-  if (existing && existing.length > 0) {
-    return { recorded: true, clickId: existing[0].id, promoterId: codeRow.promoter_id, reason: "Duplicate (last 1h)" };
-  }
-
-  const now = new Date();
-  const windowEnd = new Date(now);
-  windowEnd.setDate(windowEnd.getDate() + ATTRIBUTION_WINDOW_DAYS);
 
   const { data: click, error: insertErr } = await affiliateSupabase
     .from("referral_clicks")
@@ -129,8 +197,11 @@ export async function trackClick(input: TrackClickInput): Promise<TrackClickResu
       utm_campaign: validated.utmCampaign || null,
       utm_term: validated.utmTerm || null,
       utm_content: validated.utmContent || null,
-      clicked_at: now.toISOString(),
-      attribution_window_ends_at: windowEnd.toISOString(),
+      source: validated.source,
+      first_click_at: now,
+      last_click_at: now,
+      clicked_at: now,
+      attribution_window_ends_at: windowEnd,
     })
     .select()
     .single();

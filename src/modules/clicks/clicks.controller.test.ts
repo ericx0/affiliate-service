@@ -5,8 +5,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const { state } = vi.hoisted(() => ({
   state: {
     codeRow: null as null | { promoter_id: string; is_active: boolean; expires_at: string | null },
-    existingClicks: [] as Array<{ id: string }>,
+    existingClicks: [] as Array<{ id: string; first_click_at: string; last_click_at: string }>,
     inserts: [] as Array<Record<string, any>>,
+    updates: [] as Array<Record<string, any>>,
   },
 }));
 
@@ -18,6 +19,18 @@ vi.mock("../../config.js", () => ({
   },
   affiliateSupabase: {
     from: (table: string) => {
+      if (table === "attribution_config") {
+        return {
+          select: () => ({
+            eq: () => ({
+              single: async () => ({
+                data: { mode: "last_click", window_days: 30 },
+                error: null,
+              }),
+            }),
+          }),
+        };
+      }
       if (table === "referral_codes") {
         return {
           select: () => ({
@@ -46,6 +59,10 @@ vi.mock("../../config.js", () => ({
               }),
             }),
           }),
+          update: (row: Record<string, any>) => {
+            state.updates.push(row);
+            return { eq: async () => ({ error: null }) };
+          },
           insert: (row: Record<string, any>) => {
             state.inserts.push(row);
             return {
@@ -92,6 +109,7 @@ beforeEach(() => {
   state.codeRow = { promoter_id: "p1", is_active: true, expires_at: null };
   state.existingClicks = [];
   state.inserts = [];
+  state.updates = [];
 });
 
 describe("POST /api/affiliate/clicks/track", () => {
@@ -143,8 +161,41 @@ describe("POST /api/affiliate/clicks/track", () => {
     expect(state.inserts).toHaveLength(0);
   });
 
-  it("dedupes repeat clicks from the same IP+code within 1h", async () => {
-    state.existingClicks = [{ id: "click-existing" }];
+  it("accepts referralCode with coupon source and passes it through", async () => {
+    const { req, res, getStatus } = makeReqRes({
+      referralCode: "ABCD1234",
+      source: "coupon",
+      visitorSessionId: "550e8400-e29b-41d4-a716-446655440000",
+    });
+
+    await track(req, res);
+
+    expect(getStatus()).toBe(204);
+    expect(state.inserts[0]).toMatchObject({
+      referral_code: "ABCD1234",
+      source: "coupon",
+      visitor_session_id: "550e8400-e29b-41d4-a716-446655440000",
+    });
+  });
+
+  it("rejects an unknown source with 400", async () => {
+    const { req, res, getStatus } = makeReqRes({
+      referralCode: "ABCD1234",
+      source: "email",
+    });
+
+    await track(req, res);
+
+    expect(getStatus()).toBe(400);
+    expect(state.inserts).toHaveLength(0);
+  });
+
+  it("dedupes repeat clicks from the same IP+code within the attribution window", async () => {
+    state.existingClicks = [{
+      id: "click-existing",
+      first_click_at: "2026-08-01T00:00:00.000Z",
+      last_click_at: "2026-08-01T00:00:00.000Z",
+    }];
     const { req, res, getStatus } = makeReqRes({ code: "ABCD1234" });
     await track(req, res);
     expect(getStatus()).toBe(204);
