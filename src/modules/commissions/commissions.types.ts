@@ -5,7 +5,8 @@ export type CommissionStatus =
   | "paid"
   | "refunded"
   | "reversed"
-  | "voided";
+  | "voided"
+  | "disputed";
 
 export type CommissionType = "service" | "subscription" | "agent_service" | "agent_subscription";
 
@@ -28,6 +29,11 @@ export interface Commission {
   cumulative_refunded_amount: number;
   stripe_transfer_id: string | null;
   month_key: string | null;
+  // Dispute lifecycle (Task 1). Set by charge.dispute.* webhook.
+  disputed_at: string | null;
+  dispute_id: string | null;
+  dispute_status: "open" | "won" | "lost" | null;
+  dispute_closed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -48,15 +54,23 @@ export interface TransitionResult {
   error?: string;
 }
 
-// State transition table (spec section 6.2)
+// State transition table. 'disputed' is new in Task 1.
+//
+// Resolution matrix (from webhook charge.dispute.closed, see Task 2):
+//   disputed + won  + paid_at NOT NULL → paid     (re-credit paid state)
+//   disputed + won  + paid_at NULL     → approved (un-freeze)
+//   disputed + lost + paid_at NOT NULL → reversed (claw back via Stripe)
+//   disputed + lost + paid_at NULL     → voided   (cancel pending)
 export const VALID_TRANSITIONS: Record<CommissionStatus, CommissionStatus[]> = {
-  cooling_down: ["approved", "refunded", "voided"],
-  pending: ["cooling_down", "refunded", "voided"],
-  approved: ["paid", "refunded", "voided"],
-  paid: ["reversed"],
-  refunded: [],   // terminal
-  reversed: [],   // terminal
-  voided: [],     // terminal (fraud review: commission cancelled, never paid)
+  cooling_down: ["approved", "refunded", "voided", "disputed"],
+  pending:      ["cooling_down", "refunded", "voided", "disputed"],
+  approved:     ["paid", "refunded", "voided", "disputed"],
+  paid:         ["reversed", "disputed"],
+  refunded:     [],
+  reversed:     [],
+  voided:       [],
+  // Idempotent re-fire keeps status='disputed'; resolution paths above.
+  disputed:     ["approved", "paid", "reversed", "voided", "disputed"],
 };
 
 export function canTransition(from: CommissionStatus, to: CommissionStatus): boolean {
