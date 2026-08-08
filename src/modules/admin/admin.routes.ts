@@ -22,6 +22,7 @@ import { listAgents, listAgentKols, deleteAgent } from "./agents.controller.js";
 import { listFraudFlags, resolveFraudFlag } from "../fraud/fraud.admin.controller.js";
 import { getSigningsByEmail } from "./signings.controller.js";
 import { getTaxFormSignedUrl, postStripeReset } from "./kyc.controller.js";
+import { postDisputeResolve } from "./commissions.controller.js";
 import { resendAgentInvite } from "../notifications/notifications.service.js";
 import { logger } from "../../utils/logger.js";
 import { ResendError } from "../notifications/notifications.service.js";
@@ -89,6 +90,8 @@ adminRouter.get("/codes", listCodes);
 adminRouter.get("/commissions", listCommissions);
 adminRouter.post("/commissions/:id/approve", approveCommission);
 adminRouter.post("/commissions/:id/reverse", reverseCommission);
+// Task 3: admin manual dispute resolution (binary: won → approved, lost → voided).
+adminRouter.post("/commissions/:id/dispute-resolve", postDisputeResolve);
 
 // Refunds (read-only)
 adminRouter.get("/refunds", listRefunds);

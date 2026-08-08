@@ -8,6 +8,7 @@ import {
 } from "../notifications/notifications.service.js";
 import { groupCommissionsByPromoter, exceedsMinimum } from "./payouts.helpers.js";
 import { getOpenFlaggedCommissionIds } from "../fraud/fraud.service.js";
+import { writeAuditLog } from "../admin/audit.service.js";
 
 export interface PayoutResult {
   success: boolean;
@@ -170,6 +171,34 @@ export async function payPromoterGroup(
     return { success: false, error: taxCheck.reason! };
   }
 
+  // Task 3 — Gate 6 Layer B (race-condition defense). Re-fetch each
+  // commission's current status right before the Stripe transfer. If a
+  // webhook flipped any row to 'disputed' between the SELECT in
+  // payCommissions and this transfer, skip the whole group rather than
+  // splitting it (splitting would inflate Stripe fees and complicate the
+  // idempotency model — the non-disputed subset will be picked up next
+  // month when its status returns to 'approved').
+  const { data: refreshed } = await affiliateSupabase
+    .from("commissions")
+    .select("id, status")
+    .in("id", sortedIds);
+  const racedDisputed = (refreshed ?? []).filter((c: any) => c.status === "disputed");
+  if (racedDisputed.length > 0) {
+    logger.warn(
+      {
+        promoterId,
+        racedDisputedIds: racedDisputed.map((c: any) => c.id),
+        currency,
+      },
+      "commissions became disputed between SELECT and transfer; skipping entire group",
+    );
+    return {
+      success: false,
+      error: "Disputed commission(s) detected after SELECT; payout withheld",
+      commissionIds: racedDisputed.map((c: any) => c.id),
+    };
+  }
+
   // totalAmount is already in cents (integer).
   const amountCents = totalAmount;
 
@@ -263,32 +292,47 @@ export async function payPromoterGroup(
  * Skips groups below minimum threshold (carries over to next month).
  */
 export async function payCommissions(commissionIds: string[]): Promise<PayoutResult[]> {
+  // Task 3 — Gate 6 Layer A: SELECT ALL matching commissions (any status),
+  // then split into approved vs disputed in JS. The previous .eq("status",
+  // "approved") filter silently swallowed any commission that was already
+  // 'disputed', leaving it un-payable until an admin noticed. Now disputed
+  // rows are surfaced as PayoutResult errors so callers (and the audit log)
+  // can see exactly which rows were withheld and why.
   const { data: commissions, error } = await affiliateSupabase.from("commissions")
     .select("*, promoters(stripe_account_id, stripe_onboarding_completed)")
-    .in("id", commissionIds)
-    .eq("status", "approved");
+    .in("id", commissionIds);
 
   if (error || !commissions) {
     return [{ success: false, error: "Failed to fetch commissions" }];
   }
 
+  const disputed = (commissions as any[]).filter((c) => c.status === "disputed");
+  const approved = (commissions as any[]).filter((c) => c.status === "approved");
+
+  const results: PayoutResult[] = disputed.map((c) => ({
+    success: false,
+    error: "Disputed commission; payout withheld pending dispute resolution",
+    commissionIds: [c.id],
+  }));
+
   // Anti-fraud gate: commissions with an OPEN fraud flag are held out of
   // the batch until an admin resolves the flag (fail-closed on lookup
   // error — see getOpenFlaggedCommissionIds).
   const flaggedIds = await getOpenFlaggedCommissionIds(
-    commissions.map((c: any) => c.id as string),
+    approved.map((c: any) => c.id as string),
   );
-  const payable = (commissions as any[]).filter((c) => !flaggedIds.has(c.id));
-  const withheld: PayoutResult[] = (commissions as any[])
-    .filter((c) => flaggedIds.has(c.id))
-    .map((c) => ({
-      success: false,
-      error: "Under fraud review — payout withheld pending admin resolution",
-      commissionIds: [c.id],
-    }));
+  const payable = approved.filter((c) => !flaggedIds.has(c.id));
+  results.push(
+    ...approved
+      .filter((c) => flaggedIds.has(c.id))
+      .map((c) => ({
+        success: false,
+        error: "Under fraud review — payout withheld pending admin resolution",
+        commissionIds: [c.id],
+      })),
+  );
 
   const groups = groupCommissionsByPromoter(payable as any);
-  const results: PayoutResult[] = [...withheld];
 
   for (const group of groups.values()) {
     if (!exceedsMinimum(group.total, group.currency)) {
@@ -369,4 +413,74 @@ async function firePayoutFailedEmail(args: {
   } catch (e) {
     logger.error({ err: (e as Error).message, promoterId: args.promoterId }, "firePayoutFailedEmail inner threw");
   }
+}
+
+// ============================================================
+// Task 3 — resolveDispute(): admin manual dispute resolution.
+//
+// The webhook (charge.dispute.closed) handles the auto-resolution matrix
+// (4 branches by paid_at). The admin endpoint is for STUCK disputes where
+// the webhook didn't fire or ops manually overrides (e.g. evidence
+// submitted after auto-close, fraud review). Admin path is BINARY:
+//   won  → status='approved' (un-freeze; eligible for next payout)
+//   lost → status='voided'   (cancel pending commission)
+//
+// We do NOT call stripe.transfers.createReversal here. If the
+// commission was already paid, the webhook's 'lost + wasPaid' path
+// already handled the Stripe transfer reversal; if it was somehow paid
+// but never reversed, that's a separate bug in the webhook path — not
+// this endpoint.
+// ============================================================
+
+export interface ResolveDisputeInput {
+  commissionId: string;
+  action: "won" | "lost";
+  note?: string;
+  actorId: string;
+  actorEmail: string;
+}
+
+export async function resolveDispute(
+  commissionId: string,
+  action: "won" | "lost",
+  note: string | undefined,
+  actorId: string,
+  actorEmail: string,
+): Promise<{ success: boolean; error?: string }> {
+  const { data: existing } = await affiliateSupabase
+    .from("commissions")
+    .select("id, status, dispute_id")
+    .eq("id", commissionId)
+    .maybeSingle();
+  if (!existing) return { success: false, error: "COMMISSION_NOT_FOUND" };
+  if (existing.status !== "disputed") {
+    return { success: false, error: "COMMISSION_NOT_DISPUTED" };
+  }
+
+  const finalStatus = action === "won" ? "approved" : "voided";
+  const now = new Date().toISOString();
+  const { error } = await affiliateSupabase
+    .from("commissions")
+    .update({
+      status: finalStatus,
+      dispute_status: action === "won" ? "won" : "lost",
+      dispute_closed_at: now,
+      // won: keep disputed_at as historical record (matches webhook path)
+      // lost: clear it (dispute is finalized, no longer "open")
+      ...(action === "won" ? {} : { disputed_at: null }),
+      updated_at: now,
+    })
+    .eq("id", commissionId);
+  if (error) return { success: false, error: error.message };
+
+  await writeAuditLog({
+    actorId,
+    actorEmail,
+    action: "commission_dispute_resolve",
+    targetType: "commission",
+    targetId: commissionId,
+    afterState: { status: finalStatus, dispute_status: action },
+    reason: note ?? `admin manual resolve: ${action}`,
+  });
+  return { success: true };
 }
