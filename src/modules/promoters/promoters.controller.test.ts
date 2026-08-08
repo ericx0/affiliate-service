@@ -9,6 +9,11 @@ const { state, mocks } = vi.hoisted(() => ({
     listUsersResult: { data: { users: [] as Array<{ id: string; email?: string }> }, error: null } as any,
     rpcResult: { data: { id: "ag-1", code: "REFCODE1" }, error: null } as any,
     inviteCodeRow: { agent_invite_code: "AB12CD34EF56" } as any,
+    // R-2: pre-check result for promoters table by auth_user_id.
+    // When null + no error: happy path (no existing row, agent can be created).
+    // When set with role='kol': reject with 409 EMAIL_HAS_KOL_ROLE.
+    existingForUserRow: null as null | { id: string; role: string },
+    existingForUserError: null as null | { message: string },
     generateLinkResult: {
       data: { properties: { action_link: "https://auth.linkchinamed.com/recovery?token=abc" } },
       error: null,
@@ -44,9 +49,17 @@ vi.mock("../../config.js", () => ({
     from: (table: string) => {
       if (table !== "promoters") throw new Error("unmocked table " + table);
       return {
-        select: () => ({
+        select: (cols?: string) => ({
           eq: () => ({
-            maybeSingle: async () => ({ data: state.inviteCodeRow, error: null }),
+            // Dispatch on the SELECT column set:
+            //   - "id, role"            → R-2 pre-check by auth_user_id
+            //   - "agent_invite_code"  → invite-code readback by promoter id
+            maybeSingle: async () => {
+              if (cols === "id, role") {
+                return { data: state.existingForUserRow, error: state.existingForUserError };
+              }
+              return { data: state.inviteCodeRow, error: null };
+            },
           }),
         }),
       };
@@ -95,6 +108,9 @@ beforeEach(() => {
   state.listUsersResult = { data: { users: [] }, error: null };
   state.rpcResult = { data: { id: "ag-1", code: "REFCODE1" }, error: null };
   state.inviteCodeRow = { agent_invite_code: "AB12CD34EF56" };
+  // R-2 defaults: no existing row → happy path
+  state.existingForUserRow = null;
+  state.existingForUserError = null;
   state.generateLinkResult = {
     data: { properties: { action_link: "https://auth.linkchinamed.com/recovery?token=abc" } },
     error: null,
@@ -176,5 +192,50 @@ describe("createAgent", () => {
     expect(mocks.notifyAgentWelcome).toHaveBeenCalledWith(
       expect.objectContaining({ actionLink: null, inviteCode: "AB12CD34EF56" }),
     );
+  });
+
+  // R-2: reject when the auth_user_id already owns a role='kol' promoter
+  // row. Mirror of register.controller.ts (F-NEW-5). SQL guard in
+  // 20260809000002_admin_create_agent_kol_guard.sql is the backstop.
+  it("rejects 409 EMAIL_HAS_KOL_ROLE when existing promoter has role='kol' for the same auth user", async () => {
+    state.existingForUserRow = { id: "kol-existing", role: "kol" };
+
+    const { req, res } = makeReqRes();
+    await createAgent(req, res);
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error.code).toBe("EMAIL_HAS_KOL_ROLE");
+    // We just created the auth user → must roll it back.
+    expect(mocks.deleteUser).toHaveBeenCalledWith("u-new");
+    // Never call the RPC or send email.
+    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.notifyAgentWelcome).not.toHaveBeenCalled();
+  });
+
+  it("rejects 409 EMAIL_HAS_KOL_ROLE even when the auth user was reused (pre-existing account is NEVER deleted)", async () => {
+    state.createUserResult = { data: { user: null }, error: { code: "email_exists", message: "User already registered" } };
+    state.listUsersResult = { data: { users: [{ id: "u-existing", email: "agent@example.com" }] }, error: null };
+    state.existingForUserRow = { id: "kol-existing", role: "kol" };
+
+    const { req, res } = makeReqRes();
+    await createAgent(req, res);
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error.code).toBe("EMAIL_HAS_KOL_ROLE");
+    // Pre-existing account must NOT be deleted.
+    expect(mocks.deleteUser).not.toHaveBeenCalled();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("rolls back the just-created auth user when the R-2 pre-check query itself errors", async () => {
+    state.existingForUserError = { message: "db temporarily unavailable" };
+
+    const { req, res } = makeReqRes();
+    await createAgent(req, res);
+
+    expect(res.statusCode).toBe(500);
+    expect(res.body.error.code).toBe("PROMOTER_CHECK_FAILED");
+    expect(mocks.deleteUser).toHaveBeenCalledWith("u-new");
+    expect(mocks.rpc).not.toHaveBeenCalled();
   });
 });

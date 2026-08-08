@@ -128,6 +128,32 @@ export async function createAgent(req: Request, res: Response) {
     createdAuthUser = true;
   }
 
+  // R-2: refuse if the same auth_user_id already owns a role='kol'
+  // promoter row. Mirror of the controller pre-check in
+  // register.controller.ts (F-NEW-5) on the createAgent side; the
+  // SQL guard in 20260809000002_admin_create_agent_kol_guard.sql is
+  // the defense-in-depth backstop. Roll back the auth user we just
+  // created; never delete a pre-existing account.
+  const { data: existingForUser, error: existingErr } = await affiliateSupabase
+    .from("promoters")
+    .select("id, role")
+    .eq("auth_user_id", authUserId)
+    .maybeSingle();
+  if (existingErr) {
+    logger.error({ err: existingErr, authUserId }, "createAgent: pre-check query failed");
+    if (createdAuthUser) await supabase.auth.admin.deleteUser(authUserId);
+    return internalError(res, "PROMOTER_CHECK_FAILED", existingErr);
+  }
+  if (existingForUser && existingForUser.role === "kol") {
+    if (createdAuthUser) await supabase.auth.admin.deleteUser(authUserId);
+    return res.status(409).json({
+      error: {
+        code: "EMAIL_HAS_KOL_ROLE",
+        message: "This email is registered as a KOL. Use a different email for Agent creation.",
+      },
+    });
+  }
+
   const { data, error } = await supabase.rpc("affiliate_create_promoter", {
     p_name: input.name,
     p_email: input.email,
@@ -148,6 +174,17 @@ export async function createAgent(req: Request, res: Response) {
       }
       return res.status(409).json({
         error: { code: "AGENT_EXISTS", message: "An agent with this email already exists" },
+      });
+    }
+    // R-2 backstop: SQL guard (P0001 EMAIL_HAS_KOL_ROLE) catches the same
+    // case the controller pre-check does, but if a race or future caller
+    // bypasses the pre-check the RPC still returns clean 409.
+    if (error.code === "P0001" && error.message.includes("EMAIL_HAS_KOL_ROLE")) {
+      if (createdAuthUser) {
+        await supabase.auth.admin.deleteUser(authUserId);
+      }
+      return res.status(409).json({
+        error: { code: "EMAIL_HAS_KOL_ROLE", message: "This email is registered as a KOL. Use a different email for Agent creation." },
       });
     }
     if (createdAuthUser) {

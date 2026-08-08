@@ -60,19 +60,8 @@ vi.mock("../../config.js", () => ({
         //      "id, role", filtered by auth_user_id. Returns
         //      state.existingForUserRow.
         // We disambiguate by which columns the SELECT requests.
-        const node: any = {
-          eq: () => node,
-          maybeSingle: async () => {
-            // The select() node is created inside makeReqRes flow; we
-            // cannot inspect columns here. Instead we check eq() args.
-            // Simpler: read the last eq() call via the captured chain.
-            return { data: state.agentRow, error: null };
-          },
-        };
-        const capturedSelect = { cols: "" };
         return {
           select: (cols: string) => {
-            capturedSelect.cols = cols;
             const n: any = {
               eq: (_col: string, _val: unknown) => {
                 // F-NEW-5 disambiguation: if the SELECT includes
