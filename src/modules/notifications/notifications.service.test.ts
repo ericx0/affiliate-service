@@ -3,14 +3,15 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const { state, mocks } = vi.hoisted(() => ({
   state: {
     agentRow: null as null | { id: string; name: string; email: string; agent_invite_code: string; preferred_locale: string; role: string },
-    lastSendRow: null as null | { created_at: string },
+    // claim rpc result: array (length 1 = success, 0 = debounce hit) or null on error.
+    claimResult: null as null | Array<{ id: string; created_at: string }>,
+    claimError: null as null | { message: string },
+    claimCallCount: 0,
     generateLinkResult: { data: { properties: { action_link: "https://auth.example/recovery?token=abc" } }, error: null } as any,
-    insertedRows: [] as Array<Record<string, unknown>>,
     fetchResult: { ok: true, status: 200 } as { ok: boolean; status: number },
   },
   mocks: {
     generateLink: vi.fn(),
-    notifyAgentWelcome: vi.fn(async (_payload: any) => {}),
   },
 }));
 
@@ -43,31 +44,19 @@ vi.mock("../../config.js", () => ({
           }),
         };
       }
-      if (table === "affiliate_email_sends") {
-        return {
-          select: () => ({
-            eq: () => ({
-              eq: () => ({
-                order: () => ({
-                  limit: () => ({
-                    maybeSingle: async () => ({ data: state.lastSendRow, error: null }),
-                  }),
-                }),
-              }),
-            }),
-          }),
-          insert: (row: any) => {
-            state.insertedRows.push(row);
-            return Promise.resolve({ error: null });
-          },
-        };
-      }
       if (table === "audit_logs") {
         return {
           insert: async () => ({ error: null }),
         };
       }
       throw new Error("unmocked table " + table);
+    },
+    rpc: (fn: string) => {
+      if (fn === "claim_agent_invite_send") {
+        state.claimCallCount += 1;
+        return Promise.resolve({ data: state.claimResult, error: state.claimError });
+      }
+      throw new Error("unmocked rpc " + fn);
     },
   },
 }));
@@ -77,9 +66,7 @@ vi.mock("../admin/audit.service.js", () => ({
 }));
 
 // notifyAgentWelcome is not mocked here — we exercise it directly. It
-// only depends on fetch (stubbed) + env (RESEND_API_KEY set). The spy
-// below verifies it was called with the expected payload by wrapping
-// global fetch and inspecting the request.
+// only depends on fetch (stubbed) + env (RESEND_API_KEY set).
 const fetchSpy = vi.fn(async () => ({ ok: true, status: 200, text: async () => "ok" }));
 
 vi.mock("../../utils/logger.js", () => ({
@@ -88,11 +75,25 @@ vi.mock("../../utils/logger.js", () => ({
 
 import { resendAgentInvite } from "./notifications.service.js";
 
+function makeAgent(overrides: Partial<{ id: string; name: string; email: string; agent_invite_code: string; preferred_locale: string; role: string }> = {}) {
+  return {
+    id: "agent-1",
+    name: "X",
+    email: "x@e.com",
+    agent_invite_code: "AB12",
+    preferred_locale: "en",
+    role: "agent",
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   state.agentRow = null;
-  state.lastSendRow = null;
-  state.insertedRows = [];
+  // Default: claim succeeds (one row returned).
+  state.claimResult = [{ id: "send-1", created_at: new Date().toISOString() }];
+  state.claimError = null;
+  state.claimCallCount = 0;
   state.fetchResult = { ok: true, status: 200 };
   state.generateLinkResult = {
     data: { properties: { action_link: "https://auth.example/recovery?token=abc" } },
@@ -116,16 +117,9 @@ function fetchBody(): string | null {
 }
 
 describe("resendAgentInvite", () => {
-  it("rejects when no recent send within 60s (RESEND_TOO_SOON)", async () => {
-    state.agentRow = {
-      id: "agent-1",
-      name: "X",
-      email: "x@e.com",
-      agent_invite_code: "AB12",
-      preferred_locale: "en",
-      role: "agent",
-    };
-    state.lastSendRow = { created_at: new Date(Date.now() - 30_000).toISOString() };
+  it("rejects when claim returns 0 rows (debounce hit)", async () => {
+    state.agentRow = makeAgent();
+    state.claimResult = []; // debounce: another send within 60s
 
     await expect(
       resendAgentInvite({ promoterId: "agent-1", actorId: "admin-1" }),
@@ -134,31 +128,17 @@ describe("resendAgentInvite", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("sends email + writes affiliate_email_sends + audit on success", async () => {
-    state.agentRow = {
-      id: "agent-1",
-      name: "X",
-      email: "x@e.com",
-      agent_invite_code: "AB12",
-      preferred_locale: "en",
-      role: "agent",
-    };
-    state.lastSendRow = null;
+  it("sends email + writes audit on success (claim succeeded)", async () => {
+    state.agentRow = makeAgent();
 
     const result = await resendAgentInvite({ promoterId: "agent-1", actorId: "admin-1" });
 
     expect(result.ok).toBe(true);
+    expect(result.emailSent).toBe(true);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const body = fetchBody();
     expect(body).toContain("x@e.com");
     expect(body).toContain("AB12");
-    expect(state.insertedRows).toHaveLength(1);
-    expect(state.insertedRows[0]).toMatchObject({
-      promoter_id: "agent-1",
-      template_id: null,
-      to_email: "x@e.com",
-      category: "agent_invite",
-    });
   });
 
   it("throws AGENT_NOT_FOUND when promoter row missing", async () => {
@@ -169,23 +149,11 @@ describe("resendAgentInvite", () => {
     ).rejects.toMatchObject({ code: "AGENT_NOT_FOUND" });
 
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(state.insertedRows).toHaveLength(0);
   });
 
   it("propagates error when generateLink throws (non-fatal: still sends with null actionLink)", async () => {
-    state.agentRow = {
-      id: "agent-1",
-      name: "X",
-      email: "x@e.com",
-      agent_invite_code: "AB12",
-      preferred_locale: "en",
-      role: "agent",
-    };
-    state.lastSendRow = null;
+    state.agentRow = makeAgent();
 
-    // generateLink rejection is swallowed in resendAgentInvite (best-effort);
-    // we should still call notifyAgentWelcome (which calls fetch) with
-    // actionLink=null and write the audit row.
     mocks.generateLink.mockImplementation(async () => {
       throw new Error("supabase down");
     });
@@ -193,10 +161,64 @@ describe("resendAgentInvite", () => {
     const result = await resendAgentInvite({ promoterId: "agent-1", actorId: "admin-1" });
 
     expect(result.ok).toBe(true);
+    expect(result.emailSent).toBe(true);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    // Action link should NOT appear in the email body when generateLink failed.
     const body = fetchBody();
     expect(body).not.toContain("https://auth.example/recovery");
-    expect(state.insertedRows).toHaveLength(1);
+  });
+
+  it("returns emailSent:false when Resend returns 5xx (audit row still claimed)", async () => {
+    state.agentRow = makeAgent();
+    state.fetchResult = { ok: false, status: 500 };
+
+    const result = await resendAgentInvite({ promoterId: "agent-1", actorId: "admin-1" });
+
+    expect(result.ok).toBe(true);
+    expect(result.emailSent).toBe(false);
+    // The claim INSERT was made (we got past the debounce gate); the
+    // audit log still records the operator's intent.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("concurrent calls: only one claims the slot, the others get RESEND_TOO_SOON", async () => {
+    state.agentRow = makeAgent();
+    // Simulate the atomic claim: first call returns 1 row, all
+    // subsequent calls within the same window return 0 rows. (The real
+    // Postgres RPC guarantees this at the SQL layer; we model the
+    // contract here by branching on the invocation counter.)
+    state.claimResult = null; // initial — overridden below per call
+    state.claimError = null;
+    const realRpc = (await import("../../config.js")).affiliateSupabase.rpc;
+    (await import("../../config.js")).affiliateSupabase.rpc = ((fn: string) => {
+      if (fn !== "claim_agent_invite_send") return realRpc(fn as never);
+      state.claimCallCount += 1;
+      if (state.claimCallCount === 1) {
+        return Promise.resolve({
+          data: [{ id: "send-1", created_at: new Date().toISOString() }],
+          error: null,
+        });
+      }
+      return Promise.resolve({ data: [], error: null });
+    }) as typeof realRpc;
+
+    try {
+      const results = await Promise.allSettled([
+        resendAgentInvite({ promoterId: "agent-1", actorId: "admin-A" }),
+        resendAgentInvite({ promoterId: "agent-1", actorId: "admin-B" }),
+        resendAgentInvite({ promoterId: "agent-1", actorId: "admin-C" }),
+      ]);
+
+      const fulfilled = results.filter((r) => r.status === "fulfilled");
+      const rejected = results.filter((r) => r.status === "rejected");
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(2);
+      for (const r of rejected) {
+        expect((r as PromiseRejectedResult).reason).toMatchObject({ code: "RESEND_TOO_SOON" });
+      }
+      // Only the winning call should have invoked fetch (the Resend send).
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      (await import("../../config.js")).affiliateSupabase.rpc = realRpc;
+    }
   });
 });

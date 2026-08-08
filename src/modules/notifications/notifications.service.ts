@@ -64,9 +64,9 @@ async function notifyKol(
   email: string,
   subject: string,
   html: string,
-): Promise<void> {
-  if (!email) return;
-  await sendEmail({ to: email, subject, html });
+): Promise<boolean> {
+  if (!email) return false;
+  return sendEmail({ to: email, subject, html });
 }
 
 // ---- Templated notifications (business events) ----
@@ -231,13 +231,13 @@ export async function notifyAgentWelcome(agent: {
   email: string;
   inviteCode: string;
   actionLink: string | null;
-}): Promise<void> {
+}): Promise<boolean> {
   const setPasswordBlock = agent.actionLink
     ? `<p><a href="${escapeHtml(agent.actionLink)}" style="display:inline-block;padding:10px 18px;background:#0b5fff;color:#ffffff;text-decoration:none;border-radius:6px;">Set your password / 设置密码</a></p>
        <p style="color:#666;font-size:13px;">This link expires in 24 hours. If it expires, ask your admin to send a new one.<br/>该链接 24 小时内有效。如已过期，请联系管理员重新发送。</p>`
     : `<p style="color:#666;font-size:13px;">Password setup link is temporarily unavailable — please ask your admin to reset your password.<br/>密码设置链接暂时不可用，请联系管理员为您重置密码。</p>`;
 
-  await notifyKol(
+  return notifyKol(
     agent.email,
     "Welcome to LinkChinaMed Partner Program / 欢迎加入 LinkChinaMed 合作伙伴计划",
     `<h2>Welcome aboard, ${escapeHtml(agent.name)}!</h2>
@@ -287,20 +287,17 @@ export class ResendError extends Error {
 /**
  * Admin-triggered manual resend of the agent welcome email.
  *
- * - Looks up the agent promoter (role='agent'); 404 if missing.
- * - 60s debounce on (promoter_id, category='agent_invite') to prevent
- *   button-mash. Recent send → 429 RESEND_TOO_SOON.
- * - Generates a fresh recovery action_link so the agent can set their
- *   password if needed. Best-effort: generateLink failure is swallowed
- *   and notifyAgentWelcome is called with actionLink=null (the welcome
- *   email copy falls back to "ask your admin to reset").
- * - Reuses notifyAgentWelcome (bilingual EN+zh HTML, no plaintext
- *   password). The Resend call inside notifyAgentWelcome is itself
- *   best-effort — Resend 4xx/5xx is logged via sendEmail's logger.error
- *   but does not bubble; the affiliate_email_sends + audit_log rows are
- *   still written to record the operator's intent.
- * - Writes affiliate_email_sends (template_id=NULL — welcome email is
- *   not a row in email_templates) and audit_log row for ops traceability.
+ * Race-safe debounce: the affiliate_email_sends INSERT is the gating
+ * operation, not a preceding SELECT. We use an atomic
+ * `INSERT ... WHERE NOT EXISTS (recent send)` so two concurrent calls
+ * cannot both claim the slot — the second sees the first's row inside
+ * the same statement and inserts nothing, returning 429. This eliminates
+ * the SELECT→INSERT race that the previous implementation exposed.
+ *
+ * emailSent reflects the actual Resend outcome (notifyAgentWelcome now
+ * returns the sendEmail boolean). On Resend 4xx/5xx, emailSent is false
+ * but the affiliate_email_sends + audit_log rows are still written
+ * because they record the operator's intent (best-effort by design).
  */
 export async function resendAgentInvite(args: {
   promoterId: string;
@@ -322,24 +319,28 @@ export async function resendAgentInvite(args: {
     throw new ResendError("AGENT_NOT_FOUND", `Agent ${args.promoterId} not found`, 404);
   }
 
-  // 2. Debounce: last send within 60s → 429.
-  const { data: lastSend } = await affiliateSupabase
-    .from("affiliate_email_sends")
-    .select("created_at")
-    .eq("promoter_id", agent.id)
-    .eq("category", "agent_invite")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (lastSend?.created_at) {
-    const elapsedMs = Date.now() - new Date(lastSend.created_at).getTime();
-    if (elapsedMs < RESEND_DEBOUNCE_MS) {
-      throw new ResendError(
-        "RESEND_TOO_SOON",
-        `Last send was ${Math.round(elapsedMs / 1000)}s ago; debounce ${RESEND_DEBOUNCE_MS / 1000}s`,
-        429,
-      );
-    }
+  // 2. Atomic debounce gate via SECURITY DEFINER RPC. Single SQL
+  //    statement: INSERT ... WHERE NOT EXISTS (recent row). Two
+  //    concurrent calls cannot both claim the slot — Postgres
+  //    serializes the statement. Returns 0 rows → debounce hit.
+  const { data: claimed, error: claimErr } = await affiliateSupabase.rpc(
+    "claim_agent_invite_send",
+    { p_promoter_id: agent.id, p_to_email: agent.email },
+  );
+  if (claimErr) {
+    logger.error(
+      { err: claimErr, promoterId: agent.id },
+      "resendAgentInvite: claim rpc failed",
+    );
+    throw new ResendError("RESEND_CLAIM_FAILED", "Could not claim resend slot", 500);
+  }
+  // rpc() returns an array; empty (or null) means debounce hit.
+  if (!claimed || (Array.isArray(claimed) && claimed.length === 0)) {
+    throw new ResendError(
+      "RESEND_TOO_SOON",
+      `Last send within ${RESEND_DEBOUNCE_MS / 1000}s debounce window`,
+      429,
+    );
   }
 
   // 3. Generate recovery action link (best-effort).
@@ -359,32 +360,17 @@ export async function resendAgentInvite(args: {
     );
   }
 
-  // 4. Send welcome email via existing pipeline (best-effort; never throws).
-  await notifyAgentWelcome({
+  // 4. Send welcome email. notifyAgentWelcome returns the actual
+  //    sendEmail boolean — propagate as emailSent so the API contract
+  //    reflects real delivery, not env presence.
+  const emailSent = await notifyAgentWelcome({
     name: agent.name,
     email: agent.email,
     inviteCode: agent.agent_invite_code ?? "",
     actionLink,
   });
 
-  // 5. Audit row in affiliate_email_sends (template_id NULL: welcome email
-  //    is hardcoded HTML, not from email_templates).
-  const { error: insertErr } = await affiliateSupabase
-    .from("affiliate_email_sends")
-    .insert({
-      promoter_id: agent.id,
-      template_id: null,
-      to_email: agent.email,
-      category: "agent_invite",
-    });
-  if (insertErr) {
-    logger.error(
-      { err: insertErr, promoterId: agent.id },
-      "resendAgentInvite: affiliate_email_sends insert failed",
-    );
-  }
-
-  // 6. Operator audit log (best-effort; writeAuditLog swallows its own failures).
+  // 5. Operator audit log (best-effort; writeAuditLog swallows its own failures).
   await writeAuditLog({
     actorId: args.actorId,
     actorEmail: args.actorEmail ?? "admin@resend-invite",
@@ -395,9 +381,10 @@ export async function resendAgentInvite(args: {
       email: agent.email,
       debounce_ms: RESEND_DEBOUNCE_MS,
       had_action_link: !!actionLink,
+      email_sent: emailSent,
     },
     reason: "admin manual resend",
   });
 
-  return { ok: true, emailSent: !!env.RESEND_API_KEY };
+  return { ok: true, emailSent };
 }
