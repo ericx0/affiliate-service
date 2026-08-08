@@ -16,6 +16,34 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const ParamsSchema = z.object({ id: z.string().regex(UUID_RE) });
 
+const ListQuerySchema = z.object({
+  category: z.string().min(1).optional(),
+  promoter_id: z.string().regex(UUID_RE).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+export type NotificationLogStatus = "sent" | "failed" | "pending";
+
+export interface NotificationLogRow {
+  id: string;
+  promoter_id: string | null;
+  template_id: string | null;
+  category: string | null;
+  to_email: string;
+  sent_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  status: NotificationLogStatus;
+  promoter_email: string | null;
+}
+
+/** 状态派生：sent_at 存在 + 无错误 → sent；有错误 → failed；否则 pending。 */
+function deriveStatus(sent_at: string | null, last_error: string | null): NotificationLogStatus {
+  if (sent_at && !last_error) return "sent";
+  if (last_error) return "failed";
+  return "pending";
+}
+
 interface EmailLogRow {
   id: string;
   promoter_id: string | null;
@@ -132,4 +160,58 @@ export async function resendNotification(req: Request, res: Response): Promise<v
   });
 
   res.status(202).json({ data: { id, requeued: true } });
+}
+
+/**
+ * GET /admin/notifications — admin-only notification log listing with
+ * optional filters (category, promoter_id, limit ≤ 200). Status is
+ * derived from sent_at + last_error rather than stored, keeping the
+ * schema lean (Task 3.2 didn't add a status column by design).
+ * Joins promoters for the email column so the UI can show KOL邮箱
+ * without a second round-trip.
+ */
+export async function listNotifications(req: Request, res: Response): Promise<void> {
+  const parsed = ListQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({
+      error: { code: "VALIDATION_ERROR", message: "Invalid query", details: parsed.error.flatten() },
+    });
+    return;
+  }
+  const { category, promoter_id, limit } = parsed.data;
+
+  let q = affiliateSupabase
+    .from("affiliate_email_sends" as never)
+    .select("id, promoter_id, template_id, category, to_email, sent_at, last_error, created_at, promoters!affiliate_email_sends_promoter_id_fkey(email)")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (category) q = q.eq("category", category);
+  if (promoter_id) q = q.eq("promoter_id", promoter_id);
+
+  const { data, error } = await q;
+  if (error) {
+    logger.error({ err: error }, "listNotifications query failed");
+    res.status(500).json({ error: { code: "QUERY_FAILED", message: "Notification log query failed" } });
+    return;
+  }
+
+  const rows = (data ?? []) as Array<Omit<NotificationLogRow, "status" | "promoter_email"> & {
+    promoters?: { email?: string | null } | { email?: string | null }[] | null;
+  }>;
+
+  const result: NotificationLogRow[] = rows.map((r) => {
+    const promoterJoin = Array.isArray(r.promoters) ? r.promoters[0] : r.promoters;
+    const promoterEmail =
+      promoterJoin && typeof promoterJoin === "object" && "email" in promoterJoin
+        ? (promoterJoin.email ?? null)
+        : null;
+    const { promoters: _p, ...rest } = r;
+    return {
+      ...rest,
+      status: deriveStatus(rest.sent_at, rest.last_error),
+      promoter_email: promoterEmail,
+    };
+  });
+
+  res.json({ data: result });
 }

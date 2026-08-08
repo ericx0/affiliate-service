@@ -13,6 +13,9 @@ const { state, mocks } = vi.hoisted(() => ({
     promoterRow: null as null | { id: string; email: string; name: string },
     auditCalls: [] as Array<Record<string, unknown>>,
     resendCalls: [] as Array<{ category: string; email: string; promoterId?: string }>,
+    listRows: [] as Array<Record<string, unknown>>,
+    listError: null as null | { message: string },
+    listCalls: [] as Array<Record<string, unknown>>,
   },
   mocks: {
     notifyKolCommissionPending: vi.fn(async (...args: unknown[]) => {
@@ -36,18 +39,50 @@ const { state, mocks } = vi.hoisted(() => ({
   },
 }));
 
+/**
+ * Supabase-style chainable + thenable query builder. Records every chained
+ * call (select/order/eq/limit) on the active builder so tests can assert
+ * filter shape; pushes the recorded snapshot to state.listCalls when the
+ * builder is awaited (so all chained filters are captured in one record).
+ */
+function listChainBuilder() {
+  const recorded: Record<string, unknown> = {};
+  const target: Record<string, unknown> & { then?: unknown } = {
+    select: (...args: unknown[]) => {
+      recorded.select = args;
+      return target;
+    },
+    order: (...args: unknown[]) => {
+      recorded.order = args;
+      return target;
+    },
+    eq: (col: string, val: unknown) => {
+      recorded[`eq:${col}`] = val;
+      return target;
+    },
+    limit: (n: number) => {
+      recorded.limit = n;
+      return target;
+    },
+    maybeSingle: () => {
+      recorded.maybeSingle = true;
+      state.listCalls.push({ ...recorded });
+      return Promise.resolve({ data: state.logRow, error: null });
+    },
+  };
+  target.then = (onFulfilled: (v: unknown) => unknown) => {
+    state.listCalls.push({ ...recorded });
+    return Promise.resolve({ data: state.listRows, error: state.listError }).then(onFulfilled);
+  };
+  return target;
+}
+
 vi.mock("../../config.js", () => ({
   env: { LOG_LEVEL: "warn", NODE_ENV: "test" },
   affiliateSupabase: {
     from: (table: string) => {
       if (table === "affiliate_email_sends") {
-        return {
-          select: () => ({
-            eq: () => ({
-              maybeSingle: async () => ({ data: state.logRow, error: null }),
-            }),
-          }),
-        };
+        return listChainBuilder();
       }
       if (table === "promoters") {
         return {
@@ -84,6 +119,7 @@ vi.mock("../../utils/logger.js", () => ({
 }));
 
 import { resendNotification } from "./notifications.controller.js";
+import { listNotifications } from "./notifications.controller.js";
 
 function makeRes(params: Record<string, string>, adminUser?: { id: string; email: string }) {
   return {
@@ -94,7 +130,7 @@ function makeRes(params: Record<string, string>, adminUser?: { id: string; email
 
 function makeResObj() {
   const res = {
-    statusCode: 0,
+    statusCode: 200,
     body: undefined as unknown,
     status(code: number) {
       this.statusCode = code;
@@ -117,6 +153,9 @@ beforeEach(() => {
   state.promoterRow = null;
   state.auditCalls = [];
   state.resendCalls = [];
+  state.listRows = [];
+  state.listError = null;
+  state.listCalls = [];
 });
 
 describe("resendNotification", () => {
@@ -178,5 +217,93 @@ describe("resendNotification", () => {
     expect(state.resendCalls[0]).toMatchObject({ category: "payout_sent", email: "kol@example.com", promoterId: "p-1" });
     expect(state.auditCalls).toHaveLength(1);
     expect(state.auditCalls[0].action).toBe("notification_resend");
+  });
+});
+
+// ---- Task 3.3: listNotifications (GET /admin/notifications) ----
+
+function makeListReq(query: Record<string, unknown>, adminUser?: { id: string; email: string }) {
+  return {
+    query,
+    adminUser,
+  } as unknown as import("express").Request;
+}
+
+describe("listNotifications", () => {
+  it("returns 200 with derived status (sent/failed/pending) and joined promoter email", async () => {
+    state.listRows = [
+      {
+        id: "00000000-0000-0000-0000-000000000001",
+        promoter_id: "p-1",
+        template_id: "t-1",
+        category: "payout_sent",
+        to_email: "kol-a@example.com",
+        sent_at: "2026-08-08T00:00:00Z",
+        last_error: null,
+        created_at: "2026-08-08T01:00:00Z",
+        promoters: { email: "kol-a@example.com" },
+      },
+      {
+        id: "00000000-0000-0000-0000-000000000002",
+        promoter_id: "p-2",
+        template_id: "t-2",
+        category: "payout_failed",
+        to_email: "kol-b@example.com",
+        sent_at: null,
+        last_error: "send failed after 3 attempts",
+        created_at: "2026-08-08T02:00:00Z",
+        promoters: { email: "kol-b@company.com" },
+      },
+      {
+        id: "00000000-0000-0000-0000-000000000003",
+        promoter_id: null,
+        template_id: "t-3",
+        category: "new_referral",
+        to_email: "lead@example.com",
+        sent_at: null,
+        last_error: null,
+        created_at: "2026-08-08T03:00:00Z",
+        promoters: null,
+      },
+    ];
+    const res = makeResObj();
+    await listNotifications(makeListReq({}), res);
+    expect(res.statusCode).toBe(200);
+    const body = res.body as { data: Array<Record<string, unknown>> };
+    expect(body.data).toHaveLength(3);
+    expect(body.data[0]).toMatchObject({ status: "sent", promoter_email: "kol-a@example.com" });
+    expect(body.data[1]).toMatchObject({ status: "failed", promoter_email: "kol-b@company.com" });
+    expect(body.data[2]).toMatchObject({ status: "pending", promoter_email: null });
+  });
+
+  it("forwards category filter to the query chain", async () => {
+    state.listRows = [];
+    const res = makeResObj();
+    await listNotifications(makeListReq({ category: "payout_failed" }), res);
+    expect(res.statusCode).toBe(200);
+    expect(state.listCalls).toHaveLength(1);
+    const call = state.listCalls[0];
+    expect(call["eq:category"]).toBe("payout_failed");
+    expect(call.limit).toBe(50);
+  });
+
+  it("returns 400 on bad limit (zod max 200)", async () => {
+    const res = makeResObj();
+    await listNotifications(makeListReq({ limit: "999" }), res);
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+    expect(state.listCalls).toHaveLength(0);
+  });
+
+  it("does not gate on adminUser (auth is enforced by adminAuthMiddleware upstream)", async () => {
+    state.listRows = [];
+    const res = makeResObj();
+    // adminAuthMiddleware rejects unauthorized requests before the controller
+    // is reached; the controller itself is read-only and admin-unaware by
+    // design (mirrors resendNotification above). The smoke check confirms
+    // the chain executes without crashing on a missing adminUser shape.
+    await listNotifications(makeListReq({}, undefined), res);
+    expect(res.statusCode).toBe(200);
+    expect(state.listCalls).toHaveLength(1);
   });
 });
