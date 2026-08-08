@@ -129,6 +129,7 @@ vi.mock("../../utils/logger.js", () => ({
 
 import {
   resendAgentInvite,
+  notifyKolCommissionPaid,
   notifyKolCommissionPending,
   notifyKolPayoutSent,
   notifyKolNewReferral,
@@ -415,6 +416,74 @@ describe("notifyKolNewReferral (templated)", () => {
     expect(body).toContain("Hi K, someone signed up via your link.");
     expect(state.emailSendInserts).toHaveLength(1);
     expect(state.emailSendInserts[0].category).toBe("new_referral");
+  });
+});
+
+// F-NEW-11: commission_paid template body now has {{dashboard_url}} which
+// must be substituted per role (audit found the role param was accepted
+// but never forwarded into the substitution context).
+describe("notifyKolCommissionPaid (templated) — F-NEW-11 dashboard_url", () => {
+  it("substitutes /kol/dashboard when role='kol'", async () => {
+    state.templateRow = {
+      id: "tmpl-paid",
+      subject: "Commission paid",
+      body: '<p>Hi {{name}}, <a href="{{dashboard_url}}">view your dashboard</a>.</p>',
+    };
+
+    await notifyKolCommissionPaid({
+      email: "kol@example.com",
+      name: "K",
+      amount: 42,
+      currency: "USD",
+      promoterId: "p-1",
+      role: "kol",
+    });
+
+    const body = fetchBody();
+    expect(body).toContain("https://portal.example.com/kol/dashboard");
+    expect(body).not.toContain("{{dashboard_url}}");
+    expect(state.emailSendInserts).toHaveLength(1);
+    expect(state.emailSendInserts[0].category).toBe("commission_paid");
+  });
+
+  it("substitutes /agent/dashboard when role='agent'", async () => {
+    state.templateRow = {
+      id: "tmpl-paid",
+      subject: "Commission paid",
+      body: '<p>Hi {{name}}, <a href="{{dashboard_url}}">view your dashboard</a>.</p>',
+    };
+
+    await notifyKolCommissionPaid({
+      email: "agent@example.com",
+      name: "A",
+      amount: 100,
+      currency: "USD",
+      promoterId: "p-2",
+      role: "agent",
+    });
+
+    const body = fetchBody();
+    expect(body).toContain("https://portal.example.com/agent/dashboard");
+    expect(body).not.toContain("{{dashboard_url}}");
+  });
+
+  it("defaults to /kol/dashboard when role is omitted (back-compat)", async () => {
+    state.templateRow = {
+      id: "tmpl-paid",
+      subject: "Commission paid",
+      body: '<p><a href="{{dashboard_url}}">view</a></p>',
+    };
+
+    await notifyKolCommissionPaid({
+      email: "kol@example.com",
+      name: "K",
+      amount: 10,
+      promoterId: "p-1",
+      // role intentionally omitted
+    });
+
+    const body = fetchBody();
+    expect(body).toContain("https://portal.example.com/kol/dashboard");
   });
 });
 

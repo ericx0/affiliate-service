@@ -2,6 +2,7 @@ import { env } from "../../config.js";
 import { logger } from "../../utils/logger.js";
 import { supabase, affiliateSupabase } from "../../config.js";
 import { writeAuditLog } from "../admin/audit.service.js";
+import { dashboardUrlFor } from "../portal-urls.js";
 
 type SupportedLocale = "en" | "zh" | "ar" | "ru" | "es";
 
@@ -149,6 +150,9 @@ interface TemplatedCtx {
   currency?: string;
   orderId?: string;
   reason?: string;
+  // F-NEW-11: role drives {{dashboard_url}} substitution. Defaults to
+  // "kol" so older callers that don't pass it still get a working URL.
+  role?: "kol" | "agent";
 }
 
 /**
@@ -199,6 +203,9 @@ async function sendKolTemplatedNotification(
     currency: ctx.currency ?? "",
     order_id: ctx.orderId ?? "",
     reason: ctx.reason ?? "",
+    // F-NEW-11: substitute {{dashboard_url}} per role. Portal-URL helper
+    // already returns /kol/dashboard or /agent/dashboard based on role.
+    dashboard_url: dashboardUrlFor(ctx.role ?? "kol"),
   };
   const subject = substitute(tmpl.subject, subCtx);
   const body = substitute(tmpl.body, subCtx);
@@ -246,6 +253,9 @@ export async function notifyKolCommissionPaid(kol: {
     promoterId: kol.promoterId,
     amount: kol.amount,
     currency: kol.currency,
+    // F-NEW-11: forward role so {{dashboard_url}} resolves to the
+    // correct portal URL (was accepted but ignored prior to this fix).
+    role: kol.role,
   });
 }
 
