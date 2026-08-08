@@ -1,10 +1,17 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { state } = vi.hoisted(() => ({
   state: {
     configRow: null as null | { mode: "first_click" | "last_click"; window_days: number },
     codeRow: { promoter_id: "promoter-1", is_active: true, expires_at: null as string | null },
-    existingClicks: [] as Array<{ id: string; first_click_at: string; last_click_at: string }>,
+    existingClicks: [] as Array<{
+      id: string;
+      first_click_at: string;
+      last_click_at: string;
+      clicked_at?: string;
+      converted_order_id?: string | null;
+    }>,
+    dedupCutoff: null as string | null,
     inserts: [] as Array<Record<string, unknown>>,
     updates: [] as Array<Record<string, unknown>>,
   },
@@ -46,7 +53,10 @@ vi.mock("../../config.js", () => ({
       if (table === "referral_clicks") {
         const filteredQuery = {
           eq: () => filteredQuery,
-          gte: () => filteredQuery,
+          gte: (_column: string, cutoff: string) => {
+            state.dedupCutoff = cutoff;
+            return filteredQuery;
+          },
           limit: async () => ({ data: state.existingClicks, error: null }),
         };
         return {
@@ -79,9 +89,12 @@ beforeEach(() => {
   vi.resetModules();
   state.configRow = null;
   state.existingClicks = [];
+  state.dedupCutoff = null;
   state.inserts = [];
   state.updates = [];
 });
+
+afterEach(() => vi.useRealTimers());
 
 describe("getAttributionConfig", () => {
   it("returns defaults when the global row is missing", async () => {
@@ -102,6 +115,17 @@ describe("getAttributionConfig", () => {
       windowDays: 45,
     });
   });
+});
+
+it("uses a fixed one-hour dedup window regardless of config", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-08-08T00:00:00.000Z"));
+  state.configRow = { mode: "last_click", window_days: 30 };
+  const { trackClick } = await import("./clicks.service.js");
+
+  await trackClick({ referralCode: "ABCD1234", ipAddress: "203.0.113.10" });
+
+  expect(state.dedupCutoff).toBe("2026-08-07T23:00:00.000Z");
 });
 
 describe("trackClick attribution mode", () => {
@@ -135,6 +159,23 @@ describe("trackClick attribution mode", () => {
     expect(state.updates).toHaveLength(1);
     expect(state.updates[0]).toHaveProperty("first_click_at");
     expect(state.updates[0]).toHaveProperty("last_click_at");
+    expect(state.updates[0]).not.toHaveProperty("clicked_at");
+  });
+
+  it("inserts a new click when the recent click is already converted", async () => {
+    state.existingClicks = [{
+      id: "converted-click",
+      first_click_at: "2026-08-08T00:00:00.000Z",
+      last_click_at: "2026-08-08T00:00:00.000Z",
+      clicked_at: "2026-08-08T00:00:00.000Z",
+      converted_order_id: "order-1",
+    }];
+    const { trackClick } = await import("./clicks.service.js");
+
+    await trackClick({ referralCode: "ABCD1234", ipAddress: "203.0.113.10" });
+
+    expect(state.updates).toHaveLength(0);
+    expect(state.inserts).toHaveLength(1);
   });
 
   it("writes coupon as the click source", async () => {

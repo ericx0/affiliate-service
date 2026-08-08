@@ -53,6 +53,7 @@ export interface AttributionConfig {
 }
 
 const ATTRIBUTION_CONFIG_CACHE_MS = 60 * 60 * 1000;
+const DEDUP_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_ATTRIBUTION_CONFIG: AttributionConfig = {
   mode: "last_click",
   windowDays: 30,
@@ -100,25 +101,27 @@ interface RecentClick {
   id: string;
   first_click_at: string;
   last_click_at: string;
+  clicked_at: string;
+  converted_order_id: string | null;
 }
 
 async function findRecentClick(
   input: z.infer<typeof TrackClickSchema>,
-  windowDays: number,
 ): Promise<RecentClick | null> {
   if (!input.visitorSessionId && !input.ipAddress) return null;
 
   let query = affiliateSupabase
     .from("referral_clicks")
-    .select("id, first_click_at, last_click_at")
+    .select("id, first_click_at, last_click_at, clicked_at, converted_order_id")
     .eq("referral_code", input.referralCode);
   query = input.visitorSessionId
     ? query.eq("visitor_session_id", input.visitorSessionId)
     : query.eq("ip_address", input.ipAddress!);
 
-  const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
-  const { data } = await query.gte("last_click_at", cutoff).limit(1);
-  return data?.[0] ?? null;
+  const cutoff = new Date(Date.now() - DEDUP_WINDOW_MS).toISOString();
+  const { data } = await query.gte("clicked_at", cutoff).limit(1);
+  const recent = data?.[0] ?? null;
+  return recent?.converted_order_id ? null : recent;
 }
 
 async function updateRecentClick(options: {
@@ -129,7 +132,7 @@ async function updateRecentClick(options: {
   windowEnd: string;
 }): Promise<{ message: string } | null> {
   const timestamps = options.mode === "last_click"
-    ? { first_click_at: options.now, last_click_at: options.now, clicked_at: options.now }
+    ? { first_click_at: options.now, last_click_at: options.now }
     : { last_click_at: options.now };
   const { error } = await affiliateSupabase
     .from("referral_clicks")
@@ -168,7 +171,7 @@ export async function trackClick(input: TrackClickInput): Promise<TrackClickResu
   const config = await getAttributionConfig();
   const now = new Date().toISOString();
   const windowEnd = new Date(Date.now() + config.windowDays * 24 * 60 * 60 * 1000).toISOString();
-  const existing = await findRecentClick(validated, config.windowDays);
+  const existing = await findRecentClick(validated);
   if (existing) {
     const error = await updateRecentClick({
       clickId: existing.id,

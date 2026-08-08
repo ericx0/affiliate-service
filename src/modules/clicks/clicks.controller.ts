@@ -11,7 +11,6 @@ const TrackBodySchema = z.object({
   code: z.string().min(4).max(32).optional(),
   referralCode: z.string().min(4).max(32).optional(),
   source: ClickSourceSchema.default("link"),
-  visitorSessionId: z.string().uuid().optional(),
   landingPath: z.string().max(500).optional(),
   referrer: z.string().max(1000).optional(),
   utmSource: z.string().max(100).optional(),
@@ -46,7 +45,6 @@ export async function track(req: Request, res: Response) {
     const result = await trackClick({
       referralCode,
       source: body.source,
-      visitorSessionId: body.visitorSessionId,
       ipAddress: req.ip,
       userAgent: req.get("user-agent") ?? undefined,
       landingPath: body.landingPath,

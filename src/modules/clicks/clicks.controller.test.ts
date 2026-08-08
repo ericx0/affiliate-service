@@ -5,7 +5,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const { state } = vi.hoisted(() => ({
   state: {
     codeRow: null as null | { promoter_id: string; is_active: boolean; expires_at: string | null },
-    existingClicks: [] as Array<{ id: string; first_click_at: string; last_click_at: string }>,
+    existingClicks: [] as Array<{
+      id: string;
+      first_click_at: string;
+      last_click_at: string;
+      clicked_at?: string;
+      converted_order_id?: string | null;
+    }>,
+    dedupFilters: [] as Array<[string, unknown]>,
     inserts: [] as Array<Record<string, any>>,
     updates: [] as Array<Record<string, any>>,
   },
@@ -46,19 +53,16 @@ vi.mock("../../config.js", () => ({
         };
       }
       if (table === "referral_clicks") {
+        const filteredQuery = {
+          eq: (column: string, value: unknown) => {
+            state.dedupFilters.push([column, value]);
+            return filteredQuery;
+          },
+          gte: () => filteredQuery,
+          limit: async () => ({ data: state.existingClicks, error: null }),
+        };
         return {
-          select: () => ({
-            eq: () => ({
-              eq: () => ({
-                gte: () => ({
-                  limit: async () => ({ data: state.existingClicks, error: null }),
-                }),
-              }),
-              gte: () => ({
-                limit: async () => ({ data: state.existingClicks, error: null }),
-              }),
-            }),
-          }),
+          select: () => filteredQuery,
           update: (row: Record<string, any>) => {
             state.updates.push(row);
             return { eq: async () => ({ error: null }) };
@@ -108,6 +112,7 @@ function makeReqRes(body: unknown) {
 beforeEach(() => {
   state.codeRow = { promoter_id: "p1", is_active: true, expires_at: null };
   state.existingClicks = [];
+  state.dedupFilters = [];
   state.inserts = [];
   state.updates = [];
 });
@@ -174,8 +179,29 @@ describe("POST /api/affiliate/clicks/track", () => {
     expect(state.inserts[0]).toMatchObject({
       referral_code: "ABCD1234",
       source: "coupon",
-      visitor_session_id: "550e8400-e29b-41d4-a716-446655440000",
+      visitor_session_id: null,
     });
+  });
+
+  it("does not let body visitorSessionId bypass IP-keyed dedup", async () => {
+    state.existingClicks = [{
+      id: "click-existing",
+      first_click_at: "2026-08-08T00:00:00.000Z",
+      last_click_at: "2026-08-08T00:00:00.000Z",
+      clicked_at: "2026-08-08T00:00:00.000Z",
+    }];
+    const { req, res } = makeReqRes({
+      code: "ABCD1234",
+      visitorSessionId: "550e8400-e29b-41d4-a716-446655440000",
+    });
+
+    await track(req, res);
+
+    expect(state.dedupFilters).toContainEqual(["ip_address", "203.0.113.10"]);
+    expect(state.dedupFilters).not.toContainEqual([
+      "visitor_session_id",
+      "550e8400-e29b-41d4-a716-446655440000",
+    ]);
   });
 
   it("rejects an unknown source with 400", async () => {
@@ -190,7 +216,7 @@ describe("POST /api/affiliate/clicks/track", () => {
     expect(state.inserts).toHaveLength(0);
   });
 
-  it("dedupes repeat clicks from the same IP+code within the attribution window", async () => {
+  it("dedupes repeat clicks from the same IP+code within 1h", async () => {
     state.existingClicks = [{
       id: "click-existing",
       first_click_at: "2026-08-01T00:00:00.000Z",
