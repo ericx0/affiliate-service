@@ -164,6 +164,11 @@ const UpdateMeSchema = z
     countryCode: z.string().min(2).max(10).optional(),
     primaryPlatform: z.string().min(1).max(50).optional(),
     primaryPlatformUrl: z.string().url().max(500).optional().or(z.literal("")),
+    bio: z.string().max(500).optional(),
+    phone: z.string().regex(/^\+?[0-9\s\-()]{7,20}$/).optional(),
+    socialAccounts: z.record(z.string().min(1).max(32), z.string().url().max(500).or(z.string().min(1).max(64))).optional(),
+    preferredLocale: z.enum(["en", "zh", "ar", "ru", "es"]).optional(),
+    avatarUrl: z.string().url().max(500).optional(),
   })
   .strict();
 
@@ -191,6 +196,18 @@ export async function updateMe(req: Request, res: Response) {
     updates.primary_platform_url = parsed.data.primaryPlatformUrl || null;
   }
 
+  if (parsed.data.bio !== undefined) updates.bio = parsed.data.bio;
+  if (parsed.data.phone !== undefined) updates.phone = parsed.data.phone;
+  if (parsed.data.socialAccounts !== undefined) {
+    if (Object.getPrototypeOf(parsed.data.socialAccounts) !== Object.prototype) {
+      res.status(400).json({ error: { code: "INVALID_INPUT", message: "Invalid profile fields" } });
+      return;
+    }
+    updates.social_accounts = parsed.data.socialAccounts;
+  }
+  if (parsed.data.preferredLocale !== undefined) updates.preferred_locale = parsed.data.preferredLocale;
+  if (parsed.data.avatarUrl !== undefined) updates.avatar_url = parsed.data.avatarUrl;
+
   if (Object.keys(updates).length === 0) {
     res.status(400).json({ error: { code: "NO_FIELDS", message: "No updatable fields provided" } });
     return;
@@ -199,7 +216,7 @@ export async function updateMe(req: Request, res: Response) {
   const { data, error } = await affiliateSupabase.from("promoters")
     .update(updates)
     .eq("id", promoterId)
-    .select("id, name, email, country_code, primary_platform, primary_platform_url")
+    .select("id, name, email, country_code, primary_platform, primary_platform_url, bio, phone, social_accounts, preferred_locale, avatar_url")
     .single();
   if (error) {
     internalError(res, "UPDATE_FAILED", error);
@@ -213,6 +230,11 @@ export async function updateMe(req: Request, res: Response) {
       countryCode: data.country_code,
       primaryPlatform: data.primary_platform,
       primaryPlatformUrl: data.primary_platform_url,
+      bio: data.bio,
+      phone: data.phone,
+      socialAccounts: data.social_accounts,
+      preferredLocale: data.preferred_locale,
+      avatarUrl: data.avatar_url,
     },
   });
 }
