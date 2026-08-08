@@ -151,6 +151,12 @@ const ListPromotersSchema = z.object({
   search: z.string().optional(),
   status: z.string().optional(),
   platform: z.string().optional(),
+  // F-NEW-6: optional role filter; when present the RPC restricts
+  // the WHERE clause to that role. Caller (admin-v2 PromotersTab)
+  // passes the active roleTab value. Unknown values are rejected by
+  // the enum so an attacker can't probe the table with arbitrary
+  // strings.
+  role: z.enum(["kol", "agent"]).optional(),
   limit: z.coerce.number().default(50),
   offset: z.coerce.number().default(0),
 });
@@ -161,6 +167,7 @@ export async function listPromoters(req: Request, res: Response) {
     p_search: filters.search || null,
     p_status: filters.status || null,
     p_platform: filters.platform || null,
+    p_role: filters.role || null,
     p_limit: filters.limit,
     p_offset: filters.offset,
   });
