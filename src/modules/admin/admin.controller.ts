@@ -27,7 +27,7 @@ function assertCommissionAmountSafe(amount: unknown): number {
 // Read the real admin identity that adminAuthMiddleware attaches. Previously
 // this read req.adminId / req.adminEmail (never set) and silently logged
 // all admin actions as 0000.../unknown@linkchinamed.com.
-const adminCtx = (req: Request) => {
+export const adminCtx = (req: Request) => {
   const u = (req as any).adminUser;
   return {
     adminId: u?.id || "00000000-0000-0000-0000-000000000000",

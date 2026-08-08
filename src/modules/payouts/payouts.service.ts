@@ -314,6 +314,15 @@ export async function payCommissions(commissionIds: string[]): Promise<PayoutRes
     error: "Disputed commission; payout withheld pending dispute resolution",
     commissionIds: [c.id],
   }));
+  results.push(
+    ...(commissions as any[])
+      .filter((c) => c.status !== "disputed" && c.status !== "approved")
+      .map((c) => ({
+        success: false,
+        error: `Skipped: status is ${c.status}`,
+        commissionIds: [c.id],
+      })),
+  );
 
   // Anti-fraud gate: commissions with an OPEN fraud flag are held out of
   // the batch until an admin resolves the flag (fail-closed on lookup
@@ -447,11 +456,12 @@ export async function resolveDispute(
   actorId: string,
   actorEmail: string,
 ): Promise<{ success: boolean; error?: string }> {
-  const { data: existing } = await affiliateSupabase
+  const { data: existing, error: existingErr } = await affiliateSupabase
     .from("commissions")
     .select("id, status, dispute_id")
     .eq("id", commissionId)
     .maybeSingle();
+  if (existingErr) return { success: false, error: "DB_ERROR" };
   if (!existing) return { success: false, error: "COMMISSION_NOT_FOUND" };
   if (existing.status !== "disputed") {
     return { success: false, error: "COMMISSION_NOT_DISPUTED" };
@@ -459,7 +469,11 @@ export async function resolveDispute(
 
   const finalStatus = action === "won" ? "approved" : "voided";
   const now = new Date().toISOString();
-  const { error } = await affiliateSupabase
+  // Conditional UPDATE: only flip if still 'disputed'. Matches Task-1
+  // commissions.service.transition() pattern; prevents lost-update when
+  // two admins resolve concurrently or a webhook closes the dispute
+  // between the read and the write.
+  const { data: updatedRows, error } = await affiliateSupabase
     .from("commissions")
     .update({
       status: finalStatus,
@@ -470,8 +484,13 @@ export async function resolveDispute(
       ...(action === "won" ? {} : { disputed_at: null }),
       updated_at: now,
     })
-    .eq("id", commissionId);
+    .eq("id", commissionId)
+    .in("status", ["disputed"])
+    .select("id");
   if (error) return { success: false, error: error.message };
+  if (!updatedRows || updatedRows.length === 0) {
+    return { success: false, error: "COMMISSION_NOT_DISPUTED" };
+  }
 
   await writeAuditLog({
     actorId,
