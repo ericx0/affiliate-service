@@ -124,6 +124,33 @@ export async function selfRegister(req: Request, res: Response) {
     return;
   }
 
+  // F-NEW-5: refuse to register as KOL if the same auth_user_id already
+  // owns a role='agent' promoter row. Closes ADR-001 v3 §3
+  // "Single-email single-role" loophole at the controller layer
+  // (defence-in-depth — the SQL guard in 20260809000000 also raises
+  // EMAIL_HAS_AGENT_ROLE, but catching it here avoids the SQL round-trip
+  // + the SECURITY DEFINER RPC invocation when we already know the
+  // answer from a cheap service_role lookup).
+  const { data: existingForUser, error: existingErr } = await affiliateSupabase
+    .from("promoters")
+    .select("id, role")
+    .eq("auth_user_id", user.id)
+    .maybeSingle();
+  if (existingErr) {
+    internalError(res, "REGISTER_CHECK_FAILED", existingErr);
+    return;
+  }
+  if (existingForUser && existingForUser.role === "agent") {
+    res.status(409).json({
+      error: {
+        code: "EMAIL_HAS_AGENT_ROLE",
+        message:
+          "This email is registered as an Agent. Use a different email for KOL signup.",
+      },
+    });
+    return;
+  }
+
   // Resolve the active NDA + Affiliate Agreement templates for the clickwrap
   // consent record (ESIGN Act: the signature must be tied to a specific
   // document version via content_hash). Fail-fast BEFORE creating the

@@ -7,6 +7,8 @@ const { state } = vi.hoisted(() => ({
     agentRow: null as null | { id: string },
     refCodeRow: null as null | { promoter_id: string; promoters: { id: string; role: string; status: string } },
     registerRpcParams: null as null | Record<string, any>,
+    registerRpcError: null as null | { code: string; message: string },
+    existingForUserRow: null as null | { id: string; role: string },
   },
 }));
 
@@ -20,6 +22,9 @@ vi.mock("../../config.js", () => ({
       if (fn === "rate_limit_consume") return { data: [{ allowed: true }], error: null };
       if (fn === "affiliate_self_register_promoter") {
         state.registerRpcParams = params ?? null;
+        if (state.registerRpcError) {
+          return { data: null, error: state.registerRpcError };
+        }
         return { data: { promoter: { id: "p-new" }, code: "NEWCODE1" }, error: null };
       }
       throw new Error("unmocked rpc " + fn);
@@ -47,12 +52,48 @@ vi.mock("../../config.js", () => ({
   affiliateSupabase: {
     from: (table: string) => {
       if (table === "promoters") {
-        // agent_invite_code lookup: .select().eq().eq().eq().maybeSingle()
+        // Two distinct promoters-table queries in this controller:
+        //   1. agent_invite_code lookup (line ~193): selects "id" only,
+        //      filtered by agent_invite_code + role + status. Returns
+        //      state.agentRow.
+        //   2. F-NEW-5 pre-check (line ~131 after the patch): selects
+        //      "id, role", filtered by auth_user_id. Returns
+        //      state.existingForUserRow.
+        // We disambiguate by which columns the SELECT requests.
         const node: any = {
           eq: () => node,
-          maybeSingle: async () => ({ data: state.agentRow, error: null }),
+          maybeSingle: async () => {
+            // The select() node is created inside makeReqRes flow; we
+            // cannot inspect columns here. Instead we check eq() args.
+            // Simpler: read the last eq() call via the captured chain.
+            return { data: state.agentRow, error: null };
+          },
         };
-        return { select: () => node };
+        const capturedSelect = { cols: "" };
+        return {
+          select: (cols: string) => {
+            capturedSelect.cols = cols;
+            const n: any = {
+              eq: (_col: string, _val: unknown) => {
+                // F-NEW-5 disambiguation: if the SELECT includes
+                // "role" AND we're called via .eq("auth_user_id", ...),
+                // return state.existingForUserRow. Otherwise return
+                // state.agentRow.
+                if (cols.includes("role") && _col === "auth_user_id") {
+                  n._existing = true;
+                }
+                return n;
+              },
+              maybeSingle: async () => {
+                if (n._existing) {
+                  return { data: state.existingForUserRow, error: null };
+                }
+                return { data: state.agentRow, error: null };
+              },
+            };
+            return n;
+          },
+        };
       }
       if (table === "referral_codes") {
         return {
@@ -131,6 +172,8 @@ beforeEach(() => {
   state.agentRow = null;
   state.refCodeRow = null;
   state.registerRpcParams = null;
+  state.registerRpcError = null;
+  state.existingForUserRow = null;
 });
 
 describe("selfRegister — mandatory agent binding", () => {
@@ -217,5 +260,42 @@ describe("selfRegister — mandatory agent binding", () => {
     expect(res.statusCode).toBe(400);
     expect(res.body.error.code).toBe("INVALID_INVITE_CODE");
     expect(state.registerRpcParams).toBeNull();
+  });
+});
+
+describe("selfRegister — F-NEW-5 single-email single-role guard", () => {
+  it("auth_user_id already owns a role='agent' row -> 409 EMAIL_HAS_AGENT_ROLE, RPC not called", async () => {
+    // Simulates: admin-v2 created an Agent with this email earlier;
+    // user now tries to self-register as KOL with the same email.
+    state.existingForUserRow = { id: "agent-row", role: "agent" };
+    const { req, res } = makeReqRes(validBody({ agent_invite_code: "GOODC0DE" }));
+    await selfRegister(req, res);
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error.code).toBe("EMAIL_HAS_AGENT_ROLE");
+    expect(res.body.error.message).toMatch(/registered as an Agent/i);
+    expect(state.registerRpcParams).toBeNull();
+  });
+
+  it("auth_user_id already owns a role='kol' row -> 23505 ALREADY_REGISTERED (existing path)", async () => {
+    // Sanity: the new pre-check only blocks the *Agent* role; an
+    // existing KOL row is caught by the existing 23505 SQLSTATE handler.
+    state.existingForUserRow = { id: "kol-row", role: "kol" };
+    state.agentRow = { id: "agent-1" };
+    // Force the RPC to throw the duplicate-key error to exercise the
+    // existing handler.
+    state.registerRpcError = { code: "23505", message: "duplicate key value violates unique constraint" };
+    const { req, res } = makeReqRes(validBody({ agent_invite_code: "GOODC0DE" }));
+    await selfRegister(req, res);
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error.code).toBe("ALREADY_REGISTERED");
+  });
+
+  it("no existing row for auth_user_id -> pre-check passes, registration continues", async () => {
+    // existingForUserRow = null simulates a fresh user
+    state.agentRow = { id: "agent-1" };
+    const { req, res } = makeReqRes(validBody({ agent_invite_code: "GOODC0DE" }));
+    await selfRegister(req, res);
+    expect(res.statusCode).toBe(201);
+    expect(state.registerRpcParams?.p_recruited_by_agent_id).toBe("agent-1");
   });
 });
