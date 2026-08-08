@@ -373,6 +373,31 @@ export async function notifyAdminDispute(details: {
   );
 }
 
+// Task 2 stub — full email body + KOL dispatch implemented by Task 4.
+export async function notifyKolDisputed(details: {
+  promoterId: string;
+  commissionId: string;
+  amount: number;
+  disputeReason: string;
+}): Promise<void> {
+  logger.warn(
+    { ...details },
+    "notifyKolDisputed - stub (Task 4 will implement)",
+  );
+}
+
+// Task 2 stub — full email body + admin dispatch implemented by Task 4.
+export async function notifyAdminDisputeResolved(details: {
+  commissionId: string;
+  action: "won" | "lost";
+  note: string;
+}): Promise<void> {
+  logger.warn(
+    { ...details },
+    "notifyAdminDisputeResolved - stub (Task 4 will implement)",
+  );
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")

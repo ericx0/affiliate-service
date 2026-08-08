@@ -2,7 +2,12 @@ import { Request, Response } from "express";
 import Stripe from "stripe";
 import { stripe, supabase, affiliateSupabase, env } from "../../config.js";
 import { logger } from "../../utils/logger.js";
-import { notifyAdminDispute, notifyAdminPayoutFailure } from "../notifications/notifications.service.js";
+import {
+  notifyAdminDispute,
+  notifyAdminPayoutFailure,
+  notifyKolDisputed,
+  notifyAdminDisputeResolved,
+} from "../notifications/notifications.service.js";
 import { calculateRefundDeduction } from "../commissions/refund-helpers.js";
 import { writeAuditLog } from "../admin/audit.service.js";
 
@@ -167,31 +172,188 @@ export async function handleStripeWebhook(req: Request, res: Response) {
         break;
       }
 
-      // AS-P2-5: Stripe sent a chargeback/dispute against a charge that
-      // originated from a KOL-referred order. Alert operations so a
-      // human can review the dispute and decide whether to claw back
-      // the KOL commission. Without this handler, disputes go unnoticed
-      // until the KOL's next payout reconciliation - by which point the
-      // commission may already have been paid out.
+      // Task 2: Stripe sent a chargeback/dispute against a charge that
+      // originated from a KOL-referred order. Freeze the commission to
+      // status='disputed' so payouts skip it until resolution. The
+      // charge.dispute.closed handler resolves it via the matrix below.
+      // Idempotent via partial unique index on dispute_id.
       case "charge.dispute.created": {
         const dispute = event.data.object as Stripe.Dispute;
         const chargeId = typeof dispute.charge === "string"
           ? dispute.charge
           : dispute.charge?.id;
+        const commissionId = dispute.metadata?.commissionId
+          ?? (typeof (dispute as any).charge !== "string" ? (dispute.charge as any)?.metadata?.commissionId : undefined);
+
         logger.error(
           {
             disputeId: dispute.id,
             chargeId,
             amount: dispute.amount,
             reason: dispute.reason,
+            commissionId,
           },
-          "Stripe charge.dispute.created - investigate and decide commission clawback",
+          "Stripe charge.dispute.created - freeze commission until dispute resolves",
         );
-        // Alert operations (best-effort email; also logged above).
+
+        if (commissionId) {
+          // Idempotent: partial unique index on dispute_id catches re-delivery.
+          // If dispute_id already set on this commission, no-op (re-delivery).
+          const { data: existing } = await affiliateSupabase
+            .from("commissions")
+            .select("id, dispute_id, status, commission_amount, promoter_id")
+            .eq("id", commissionId)
+            .maybeSingle();
+
+          if (existing && existing.dispute_id === dispute.id) {
+            logger.info({ commissionId, disputeId: dispute.id }, "dispute.created already applied; idempotent skip");
+          } else if (existing) {
+            const now = new Date().toISOString();
+            const { error: updErr } = await affiliateSupabase
+              .from("commissions")
+              .update({
+                status: "disputed",
+                disputed_at: now,
+                dispute_id: dispute.id,
+                dispute_status: "open",
+                updated_at: now,
+              })
+              .eq("id", commissionId);
+            if (updErr) throw updErr;
+
+            await writeAuditLog({
+              actorId: SYSTEM_WEBHOOK_ACTOR_ID,
+              actorEmail: "system@stripe-webhook",
+              action: "commission_dispute_freeze",
+              targetType: "commission",
+              targetId: commissionId,
+              afterState: { dispute_id: dispute.id, status: "disputed" },
+              reason: `stripe_dispute=${dispute.id}; reason=${dispute.reason ?? "unknown"}`,
+            });
+
+            await notifyKolDisputed({
+              promoterId: existing.promoter_id ?? "",
+              commissionId,
+              amount: existing.commission_amount ?? 0,
+              disputeReason: dispute.reason ?? "cardholder dispute",
+            }).catch((e) =>
+              logger.error({ error: (e as Error).message }, "notifyKolDisputed failed"),
+            );
+          }
+        }
+
+        // Always alert ops (best-effort).
         await notifyAdminDispute({
           commissionId: chargeId || dispute.id,
           reason: dispute.reason || "unknown",
         });
+        break;
+      }
+
+      // Task 2: dispute resolved. Apply the resolution matrix
+      // (user ruling 2026-08-08):
+      //   won  + wasPaid  → paid     (un-freeze; money already went out)
+      //   won  + !wasPaid → approved (un-freeze; eligible for next payout)
+      //   lost + wasPaid  → reversed (claw back via stripe.transfers.createReversal)
+      //   lost + !wasPaid → voided   (cancel pending commission)
+      // Idempotent on dispute_closed_at IS NOT NULL.
+      case "charge.dispute.closed": {
+        const dispute = event.data.object as Stripe.Dispute;
+        const commissionId = dispute.metadata?.commissionId
+          ?? (typeof (dispute as any).charge !== "string" ? (dispute.charge as any)?.metadata?.commissionId : undefined);
+
+        if (!commissionId) {
+          logger.warn({ disputeId: dispute.id }, "charge.dispute.closed missing commissionId metadata");
+          break;
+        }
+
+        const { data: existing } = await affiliateSupabase
+          .from("commissions")
+          .select("id, status, dispute_id, dispute_closed_at, paid_at, stripe_transfer_id")
+          .eq("id", commissionId)
+          .maybeSingle();
+        if (!existing) {
+          logger.warn({ disputeId: dispute.id, commissionId }, "charge.dispute.closed: commission not found");
+          break;
+        }
+        if (existing.dispute_closed_at) {
+          logger.info({ commissionId, disputeId: dispute.id }, "dispute.closed already applied; idempotent skip");
+          break;
+        }
+
+        const won = dispute.status === "won";
+        const wasPaid = !!existing.paid_at;
+        let targetStatus: "approved" | "paid" | "reversed" | "voided";
+        if (won) {
+          targetStatus = wasPaid ? "paid" : "approved";
+        } else {
+          targetStatus = wasPaid ? "reversed" : "voided";
+        }
+        const now = new Date().toISOString();
+
+        const { error: updErr } = await affiliateSupabase
+          .from("commissions")
+          .update({
+            status: targetStatus,
+            dispute_status: dispute.status,
+            dispute_closed_at: now,
+            updated_at: now,
+            // won: keep disputed_at as historical record (don't update);
+            // lost: clear it (dispute is finalized, no longer "open")
+            ...(won ? {} : { disputed_at: null }),
+          })
+          .eq("id", commissionId);
+        if (updErr) throw updErr;
+
+        // Stripe transfer reversal for lost + wasPaid. Idempotent via
+        // transfer.idempotency_key on Stripe side; safe to re-fire on
+        // duplicate webhook delivery.
+        if (!won && wasPaid && existing.stripe_transfer_id) {
+          try {
+            await stripe.transfers.createReversal(existing.stripe_transfer_id, {
+              metadata: {
+                commissionId,
+                disputeId: dispute.id,
+                reason: "dispute_lost",
+              },
+            });
+            logger.info(
+              { commissionId, transferId: existing.stripe_transfer_id },
+              "Stripe transfer reversed on dispute.lost",
+            );
+          } catch (revErr) {
+            logger.error(
+              { err: revErr, commissionId, transferId: existing.stripe_transfer_id },
+              "transfer reversal failed; manual ops follow-up required",
+            );
+            // Don't throw — commission status is already updated; ops must
+            // claw back manually. The error is logged + audit + admin
+            // notification below.
+          }
+        }
+
+        logger.warn(
+          { commissionId, disputeId: dispute.id, status: targetStatus, disputeStatus: dispute.status },
+          "Stripe charge.dispute.closed - commission resolved",
+        );
+
+        await writeAuditLog({
+          actorId: SYSTEM_WEBHOOK_ACTOR_ID,
+          actorEmail: "system@stripe-webhook",
+          action: "commission_dispute_resolve",
+          targetType: "commission",
+          targetId: commissionId,
+          afterState: { dispute_id: dispute.id, status: targetStatus, dispute_status: dispute.status },
+          reason: `stripe_dispute_closed; outcome=${dispute.status}`,
+        });
+
+        await notifyAdminDisputeResolved({
+          commissionId,
+          action: won ? "won" : "lost",
+          note: `stripe_dispute=${dispute.id}`,
+        }).catch((e) =>
+          logger.error({ error: (e as Error).message }, "notifyAdminDisputeResolved failed"),
+        );
         break;
       }
 
