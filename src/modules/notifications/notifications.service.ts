@@ -138,6 +138,7 @@ type TemplatedCategory =
   | "commission_pending"
   | "commission_reversed"
   | "commission_paid"
+  | "commission_disputed"
   | "payout_sent"
   | "payout_failed"
   | "new_referral";
@@ -150,6 +151,11 @@ interface TemplatedCtx {
   currency?: string;
   orderId?: string;
   reason?: string;
+  // Task 4: commission_disputed placeholders. {{commission_id}} shortens
+  // to first 8 chars at template level; {{dispute_reason}} is the raw
+  // Stripe dispute.reason string (e.g. "fraudulent").
+  commissionId?: string;
+  disputeReason?: string;
   // F-NEW-11: role drives {{dashboard_url}} substitution. Defaults to
   // "kol" so older callers that don't pass it still get a working URL.
   role?: "kol" | "agent";
@@ -203,6 +209,9 @@ async function sendKolTemplatedNotification(
     currency: ctx.currency ?? "",
     order_id: ctx.orderId ?? "",
     reason: ctx.reason ?? "",
+    // Task 4: commission_disputed template placeholders.
+    commission_id: ctx.commissionId ? ctx.commissionId.slice(0, 8) : "",
+    dispute_reason: ctx.disputeReason ?? "",
     // F-NEW-11: substitute {{dashboard_url}} per role. Portal-URL helper
     // already returns /kol/dashboard or /agent/dashboard based on role.
     dashboard_url: dashboardUrlFor(ctx.role ?? "kol"),
@@ -373,28 +382,73 @@ export async function notifyAdminDispute(details: {
   );
 }
 
-// Task 2 stub — full email body + KOL dispatch implemented by Task 4.
+// Task 4: send the charge.dispute.created email to the KOL via the
+// shared sendKolTemplatedNotification helper. The helper handles the
+// opt-out check (notification_prefs.commission_disputed), locale
+// resolution (promoter.preferred_locale), template fetch by category
+// + locale, {{key}} substitution, 3-attempt retry, the
+// affiliate_email_sends log row, and the audit log. We only fetch the
+// promoter record to get email + display name.
+//
+// ponytail: reuses sendKolTemplatedNotification — no parallel send
+// path. Currency is hardcoded "USD" because the webhook's SELECT
+// doesn't yet fetch commissions.currency; pulling it requires a
+// wider diff touching the stripe-webhook test mock and is out of
+// scope for the notification template task.
 export async function notifyKolDisputed(details: {
   promoterId: string;
   commissionId: string;
   amount: number;
   disputeReason: string;
 }): Promise<void> {
-  logger.warn(
-    { ...details },
-    "notifyKolDisputed - stub (Task 4 will implement)",
-  );
+  if (!details.promoterId) {
+    logger.warn(
+      { commissionId: details.commissionId },
+      "notifyKolDisputed: missing promoterId",
+    );
+    return;
+  }
+  const { data: kol } = await affiliateSupabase
+    .from("promoters")
+    .select("email, name")
+    .eq("id", details.promoterId)
+    .maybeSingle();
+  if (!kol?.email) {
+    logger.warn(
+      { promoterId: details.promoterId },
+      "notifyKolDisputed: promoter has no email",
+    );
+    return;
+  }
+  await sendKolTemplatedNotification("commission_disputed", {
+    email: kol.email,
+    name: kol.name ?? "",
+    promoterId: details.promoterId,
+    amount: details.amount,
+    currency: "USD", // TODO: webhook SELECT to fetch commissions.currency
+    commissionId: details.commissionId,
+    disputeReason: details.disputeReason,
+    role: "kol",
+  });
 }
 
-// Task 2 stub — full email body + admin dispatch implemented by Task 4.
+// Task 4: dispute outcome (won/lost) admin email. Admin has no
+// opt-out prefs, so this bypasses the template helper and inlines a
+// small HTML body via notifyAdmin + escapeHtml.
 export async function notifyAdminDisputeResolved(details: {
   commissionId: string;
   action: "won" | "lost";
   note: string;
 }): Promise<void> {
-  logger.warn(
-    { ...details },
-    "notifyAdminDisputeResolved - stub (Task 4 will implement)",
+  await notifyAdmin(
+    `[Affiliate] Dispute resolved: ${details.commissionId.slice(0, 8)} (${details.action})`,
+    `<h2>Dispute resolved</h2>
+     <ul>
+       <li><b>Commission:</b> <code>${escapeHtml(details.commissionId)}</code></li>
+       <li><b>Outcome:</b> <strong>${escapeHtml(details.action)}</strong></li>
+       <li><b>Note:</b> ${escapeHtml(details.note)}</li>
+     </ul>
+     <p>Review at <a href="https://affiliate.linkchinamed.com/admin">affiliate.linkchinamed.com/admin</a></p>`,
   );
 }
 
