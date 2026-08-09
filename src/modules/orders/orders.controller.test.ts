@@ -69,10 +69,18 @@ vi.mock("../../config.js", () => {
             in: vi.fn(() => ({
               // Awaited by direct UPDATE in onOrderRefunded (destructure { error }).
               // Also chained by transition(): .in().select().single().
+              // Used by onOrderDisputeResolved's CAS guard (.in("status", ["disputed"])).
               get error() {
                 return null;
               },
               select: vi.fn(() => ({
+                // onOrderDisputeResolved awaits .select("id") → returns rows array.
+                get data() {
+                  // Mirror the .in() guard behaviour: if the row's status
+                  // isn't "disputed", return empty so update_succeeded=false.
+                  const target = state.commissions[0];
+                  return target && target.status === "disputed" ? [{ id: target.id }] : [];
+                },
                 single: vi.fn(async () => ({
                   data: state.commission,
                   error: null,
@@ -103,8 +111,27 @@ vi.mock("../../config.js", () => {
   };
 });
 
-import { onOrderRefunded, onOrderPaid, onOrderCompleted } from "./orders.controller.js";
+// Notification mocks for the dispute handlers.
+vi.mock("../notifications/notifications.service.js", () => ({
+  notifyAdminDispute: vi.fn(async () => {}),
+  notifyKolDisputed: vi.fn(async () => {}),
+  notifyAdminDisputeResolved: vi.fn(async () => {}),
+  notifyAdminDisputeReversalFailed: vi.fn(async () => {}),
+}));
+
+vi.mock("../admin/audit.service.js", () => ({
+  writeAuditLog: vi.fn(async () => true),
+}));
+
+import { onOrderRefunded, onOrderPaid, onOrderCompleted, onOrderDisputed, onOrderDisputeResolved } from "./orders.controller.js";
 import { supabase, stripe } from "../../config.js";
+import { writeAuditLog } from "../admin/audit.service.js";
+import {
+  notifyKolDisputed,
+  notifyAdminDispute,
+  notifyAdminDisputeResolved,
+  notifyAdminDisputeReversalFailed,
+} from "../notifications/notifications.service.js";
 
 const UUID = "00000000-0000-0000-0000-000000000001";
 
@@ -337,6 +364,7 @@ describe("onOrderRefunded - partial refund", () => {
       body: { eventId: "evt_skip", orderId: UUID, refundAmount: 400, reason: "skip" },
     };
     const { json, res } = makeRes();
+    expect(json).toBeDefined();
     await onOrderRefunded(req, res);
     expect(json).toHaveBeenCalledWith(expect.objectContaining({ success: true, commissionsAffected: 0 }));
     expect(state.updateCalls.length).toBe(0);
@@ -351,6 +379,7 @@ describe("onOrderRefunded - partial refund", () => {
       body: { eventId: "evt_empty", orderId: UUID, refundAmount: 400, reason: "empty" },
     };
     const { json, res } = makeRes();
+    expect(json).toBeDefined();
     await onOrderRefunded(req, res);
     expect(json).toHaveBeenCalledWith(expect.objectContaining({ success: true, commissionsAffected: 0 }));
   });
@@ -365,6 +394,7 @@ describe("onOrderRefunded - partial refund", () => {
       body: { eventId: "evt_clamp", orderId: UUID, refundAmount: 500, reason: "clamp" },
     };
     const { json, res } = makeRes();
+    expect(json).toBeDefined();
     await onOrderRefunded(req, res);
     // effectiveRefund = min(500, 2000-1800) = 200; newCumulative = 2000 -> transition to refunded
     expect(json).toHaveBeenCalledWith(expect.objectContaining({ success: true, commissionsAffected: 1 }));
@@ -544,3 +574,270 @@ describe("onOrderPaid / onOrderCompleted idempotency", () => {
 // Touch imports so type-checker knows they're used (mocked module is replaced at runtime)
 void supabase;
 void stripe;
+
+describe("onOrderDisputed (internal HMAC endpoint)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.insertError = null;
+    state.updateCalls = [];
+    state.commissions = [];
+    state.commission = {};
+  });
+
+  it("freezes matching commission to status='disputed' and writes dispute_id+dispute_status='open'", async () => {
+    stageCommission({
+      id: "cm_1", status: "approved", promoter_id: "p_1", order_id: UUID,
+      commission_amount: 5000, dispute_id: null, dispute_status: null,
+    });
+    const req: any = {
+      body: { disputeId: "dp_1", orderId: UUID, amountCents: 5000, currency: "usd", reason: "fraudulent", status: "needs_response" },
+    };
+    const { json, status, res } = makeRes();
+    await onOrderDisputed(req, res);
+    expect(status).not.toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({ success: true, commissionsFrozen: 1 }));
+    // Commission was updated to disputed.
+    expect(state.updateCalls).toContainEqual(
+      expect.objectContaining({
+        status: "disputed",
+        dispute_id: "dp_1",
+        dispute_status: "open",
+      }),
+    );
+    expect(writeAuditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: "commission_dispute_freeze",
+      targetId: "cm_1",
+    }));
+    expect(notifyKolDisputed).toHaveBeenCalledWith({
+      promoterId: "p_1",
+      commissionId: "cm_1",
+      amount: "50.00", // cents→display string conversion
+      disputeReason: "fraudulent",
+    });
+    expect(notifyAdminDispute).toHaveBeenCalled();
+  });
+
+  it("is idempotent: replay with same disputeId skips freeze + notifications", async () => {
+    stageCommission({
+      id: "cm_2", status: "disputed", promoter_id: "p_2", order_id: UUID,
+      commission_amount: 5000, dispute_id: "dp_2", dispute_status: "open",
+    });
+    state.updateCalls = [];
+    const req: any = {
+      body: { disputeId: "dp_2", orderId: UUID, amountCents: 5000, currency: "usd", reason: "fraudulent", status: "needs_response" },
+    };
+    const { json, res } = makeRes();
+    expect(json).toBeDefined();
+    await onOrderDisputed(req, res);
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({ success: true, commissionsFrozen: 0 }));
+    expect(state.updateCalls).toHaveLength(0);
+    expect(notifyKolDisputed).not.toHaveBeenCalled();
+  });
+
+  it("returns success with commissionsFrozen=0 when no commissions match the orderId", async () => {
+    state.commissions = [];
+    const req: any = {
+      body: { disputeId: "dp_x", orderId: UUID, amountCents: 5000, currency: "usd", reason: "fraudulent", status: "needs_response" },
+    };
+    const { json, res } = makeRes();
+    expect(json).toBeDefined();
+    await onOrderDisputed(req, res);
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({ success: true, commissionsFrozen: 0 }));
+  });
+});
+
+describe("onOrderDisputeResolved (internal HMAC endpoint)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.insertError = null;
+    state.updateCalls = [];
+    state.commissions = [];
+    state.commission = {};
+  });
+
+  it("won + wasPaid → status='paid' (un-freeze, money already went out)", async () => {
+    stageCommission({
+      id: "cm_1", status: "disputed", promoter_id: "p_1", order_id: UUID,
+      commission_amount: 5000, dispute_id: "dp_1", dispute_status: "open",
+      dispute_closed_at: null, paid_at: "2026-08-01T00:00:00Z", stripe_transfer_id: "tr_1",
+    });
+    const req: any = {
+      body: { disputeId: "dp_1", orderId: UUID, outcome: "won" },
+    };
+    const { json, res } = makeRes();
+    expect(json).toBeDefined();
+    await onOrderDisputeResolved(req, res);
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({ success: true, commissionsResolved: 1 }));
+    expect(state.updateCalls).toContainEqual(
+      expect.objectContaining({ status: "paid", dispute_status: "won" }),
+    );
+    expect(notifyAdminDisputeResolved).toHaveBeenCalledWith(expect.objectContaining({
+      commissionId: "cm_1",
+      action: "won",
+    }));
+  });
+
+  it("won + !wasPaid → status='approved' (un-freeze, eligible for next payout)", async () => {
+    stageCommission({
+      id: "cm_2", status: "disputed", promoter_id: "p_2", order_id: UUID,
+      commission_amount: 5000, dispute_id: "dp_2", dispute_status: "open",
+      dispute_closed_at: null, paid_at: null, stripe_transfer_id: null,
+    });
+    const req: any = {
+      body: { disputeId: "dp_2", orderId: UUID, outcome: "won" },
+    };
+    const { json, res } = makeRes();
+    expect(json).toBeDefined();
+    await onOrderDisputeResolved(req, res);
+    expect(state.updateCalls).toContainEqual(
+      expect.objectContaining({ status: "approved", dispute_status: "won" }),
+    );
+    expect(notifyAdminDisputeResolved).toHaveBeenCalledWith(expect.objectContaining({
+      action: "won",
+    }));
+  });
+
+  it("lost + wasPaid → status='reversed' + stripe.transfers.createReversal with commission-level idempotencyKey", async () => {
+    stageCommission({
+      id: "cm_3", status: "disputed", promoter_id: "p_3", order_id: UUID,
+      commission_amount: 5000, dispute_id: "dp_3", dispute_status: "open",
+      dispute_closed_at: null, paid_at: "2026-08-01T00:00:00Z", stripe_transfer_id: "tr_3",
+    });
+    const req: any = {
+      body: { disputeId: "dp_3", orderId: UUID, outcome: "lost" },
+    };
+    const { json, res } = makeRes();
+    expect(json).toBeDefined();
+    await onOrderDisputeResolved(req, res);
+    expect(state.updateCalls).toContainEqual(
+      expect.objectContaining({ status: "reversed", dispute_status: "lost" }),
+    );
+    expect(stripe.transfers.createReversal).toHaveBeenCalledWith(
+      "tr_3",
+      expect.objectContaining({
+        metadata: { commissionId: "cm_3", disputeId: "dp_3", reason: "dispute_lost" },
+      }),
+      { idempotencyKey: "commission-reversal-cm_3" },
+    );
+    expect(notifyAdminDisputeResolved).toHaveBeenCalledWith(expect.objectContaining({
+      action: "lost",
+    }));
+  });
+
+  it("lost + !wasPaid → status='voided' (cancel pending commission)", async () => {
+    stageCommission({
+      id: "cm_4", status: "disputed", promoter_id: "p_4", order_id: UUID,
+      commission_amount: 5000, dispute_id: "dp_4", dispute_status: "open",
+      dispute_closed_at: null, paid_at: null, stripe_transfer_id: null,
+    });
+    const req: any = {
+      body: { disputeId: "dp_4", orderId: UUID, outcome: "lost" },
+    };
+    const { json, res } = makeRes();
+    expect(json).toBeDefined();
+    await onOrderDisputeResolved(req, res);
+    expect(state.updateCalls).toContainEqual(
+      expect.objectContaining({ status: "voided", dispute_status: "lost" }),
+    );
+    expect(notifyAdminDisputeResolved).toHaveBeenCalledWith(expect.objectContaining({
+      action: "lost",
+    }));
+  });
+
+  it("warning_closed outcome is treated as won (no money was forcefully taken)", async () => {
+    stageCommission({
+      id: "cm_5", status: "disputed", promoter_id: "p_5", order_id: UUID,
+      commission_amount: 5000, dispute_id: "dp_5", dispute_status: "open",
+      dispute_closed_at: null, paid_at: null, stripe_transfer_id: null,
+    });
+    const req: any = {
+      body: { disputeId: "dp_5", orderId: UUID, outcome: "warning_closed" },
+    };
+    const { json, res } = makeRes();
+    expect(json).toBeDefined();
+    await onOrderDisputeResolved(req, res);
+    expect(state.updateCalls).toContainEqual(
+      expect.objectContaining({ status: "approved", dispute_status: "won" }),
+    );
+  });
+
+  it("lost + wasPaid + createReversal THROWS → status stays 'disputed', reversal_failed audit + ops email", async () => {
+    // stageCommission first so the row is in 'disputed' state (passes the
+    // .in("status", ["disputed"]) guard in the test mock).
+    stageCommission({
+      id: "cm_rev_fail", status: "disputed", promoter_id: "p_rev", order_id: UUID,
+      commission_amount: 5000, dispute_id: "dp_rev", dispute_status: "open",
+      dispute_closed_at: null, paid_at: "2026-08-01T00:00:00Z", stripe_transfer_id: "tr_rev",
+    });
+    // Now make createReversal throw for this single call.
+    (stripe.transfers.createReversal as any).mockImplementationOnce(() => {
+      throw new Error("Stripe API timeout");
+    });
+    const req: any = {
+      body: { disputeId: "dp_rev", orderId: UUID, outcome: "lost" },
+    };
+    const { json, res } = makeRes();
+    expect(json).toBeDefined();
+    await onOrderDisputeResolved(req, res);
+    // We hit `continue` after the reversal failure, so the DB was NOT
+    // updated and no "resolved" notification fired.
+    expect(state.updateCalls).toHaveLength(0);
+    expect(writeAuditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: "commission_reversal_failed",
+      targetId: "cm_rev_fail",
+    }));
+    expect(notifyAdminDisputeReversalFailed).toHaveBeenCalledWith({
+      commissionId: "cm_rev_fail",
+      transferId: "tr_rev",
+      error: expect.stringContaining("Stripe API timeout"),
+    });
+    expect(notifyAdminDisputeResolved).not.toHaveBeenCalled();
+  });
+
+  it("UPDATE .in('status', ['disputed']) guard rejects already-resolved commissions", async () => {
+    // stage a commission NOT in 'disputed' so the .in() guard returns []
+    stageCommission({
+      id: "cm_race", status: "paid", promoter_id: "p_race", order_id: UUID,
+      commission_amount: 5000, dispute_id: "dp_race", dispute_status: "open",
+      dispute_closed_at: null, paid_at: "2026-08-01T00:00:00Z", stripe_transfer_id: "tr_race",
+    });
+    const req: any = {
+      body: { disputeId: "dp_race", orderId: UUID, outcome: "lost" },
+    };
+    const { json, res } = makeRes();
+    expect(json).toBeDefined();
+    await onOrderDisputeResolved(req, res);
+    // Guard rejected → audit log fires UNCONDITIONALLY with
+    // update_succeeded=false so the trail survives the race (R2 audit
+    // fix Q1: money may have moved via the reversal; we MUST leave a
+    // trail even if the DB row was already settled).
+    expect(writeAuditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: "commission_dispute_resolve",
+      targetId: "cm_race",
+      afterState: expect.objectContaining({ update_succeeded: false }),
+    }));
+    // Ops notification also fires (unconditional) so admins see the race.
+    expect(notifyAdminDisputeResolved).toHaveBeenCalledWith(expect.objectContaining({
+      commissionId: "cm_race",
+      action: "lost",
+      note: expect.stringContaining("dp_race"),
+    }));
+  });
+
+  it("is idempotent: replay with same disputeId + closed_at skips resolve", async () => {
+    stageCommission({
+      id: "cm_idem", status: "paid", promoter_id: "p_idem", order_id: UUID,
+      commission_amount: 5000, dispute_id: "dp_idem", dispute_status: "won",
+      dispute_closed_at: "2026-08-02T00:00:00Z",
+      paid_at: "2026-08-01T00:00:00Z", stripe_transfer_id: "tr_idem",
+    });
+    const req: any = {
+      body: { disputeId: "dp_idem", orderId: UUID, outcome: "won" },
+    };
+    const { json, res } = makeRes();
+    expect(json).toBeDefined();
+    await onOrderDisputeResolved(req, res);
+    expect(state.updateCalls).toHaveLength(0);
+    expect(notifyAdminDisputeResolved).not.toHaveBeenCalled();
+  });
+});

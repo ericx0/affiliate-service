@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { z } from "zod";
 import { logger } from "../../utils/logger.js";
-import { affiliateSupabase } from "../../config.js";
+import { affiliateSupabase, stripe } from "../../config.js";
 import {
   attachToOrder,
   transition,
@@ -12,6 +12,18 @@ import { calculateRefundDeduction } from "../commissions/refund-helpers.js";
 import { Commission } from "../commissions/commissions.types.js";
 import { checkSelfReferral } from "../fraud/fraud.service.js";
 import { internalError } from "../../utils/controller-error.js";
+import {
+  notifyKolDisputed,
+  notifyAdminDispute,
+  notifyAdminDisputeResolved,
+  notifyAdminDisputeReversalFailed,
+} from "../notifications/notifications.service.js";
+import { writeAuditLog } from "../admin/audit.service.js";
+
+// Sentinel UUID for audit rows written by the internal dispute endpoint
+// (no human actor — must satisfy NOT NULL UUID on audit_logs.target_id and
+// actor_id). Mirrors stripe-webhook.controller.ts.
+const SYSTEM_INTERNAL_ACTOR_ID = "00000000-0000-0000-0000-000000000002";
 
 const AttachSchema = z.object({
   orderId: z.string().uuid(),
@@ -321,4 +333,213 @@ export async function getOrderPromoter(req: Request, res: Response) {
   }
 
   res.json({ promoterId: order.promoter_id, status: order.status, commissionAmount: order.commission_amount });
+}
+
+// DisputeEmitSchema (linkchinamed-web/src/lib/affiliate-service.ts).
+// These endpoints exist because customer payment disputes hit the main
+// platform's Stripe webhook (linkchinamed-web), not affiliate-service's.
+// Forwarding via HMAC bridge lets affiliate-service freeze / resolve
+// commissions using the orderId it already understands.
+const OrderDisputedSchema = z.object({
+  disputeId: z.string().min(1).max(200),
+  orderId: z.string().uuid(),
+  amountCents: z.number().int().nonnegative(),
+  currency: z.string().min(3).max(10),
+  reason: z.string().min(1).max(200),
+  status: z.string().min(1).max(50),
+});
+
+const OrderDisputeResolvedSchema = z.object({
+  disputeId: z.string().min(1).max(200),
+  orderId: z.string().uuid(),
+  outcome: z.enum(["won", "lost", "warning_closed"]),
+});
+
+export async function onOrderDisputed(req: Request, res: Response) {
+  const { disputeId, orderId, reason } = OrderDisputedSchema.parse(req.body);
+
+  const commissions = await getCommissionsForOrder(orderId);
+  if (commissions.length === 0) {
+    logger.info({ orderId, disputeId }, "no commissions for disputed order");
+    return res.json({ success: true, commissionsFrozen: 0 });
+  }
+
+  const now = new Date().toISOString();
+  let count = 0;
+
+  for (const c of commissions) {
+    // Idempotent on disputeId: if this commission already records this
+    // dispute, skip. Partial unique index on dispute_id also enforces
+    // this at the DB level.
+    if (c.dispute_id === disputeId) continue;
+    // Already in a terminal dispute state — don't re-freeze.
+    if (c.dispute_status === "open") continue;
+
+    const { error: updErr } = await affiliateSupabase.from("commissions")
+      .update({
+        status: "disputed",
+        disputed_at: now,
+        dispute_id: disputeId,
+        dispute_status: "open",
+        updated_at: now,
+      })
+      .eq("id", c.id);
+    if (updErr) {
+      logger.error(
+        { err: updErr, commissionId: c.id, disputeId },
+        "commission freeze UPDATE failed",
+      );
+      throw updErr;
+    }
+    count++;
+
+    await writeAuditLog({
+      actorId: SYSTEM_INTERNAL_ACTOR_ID,
+      actorEmail: "system@order-dispute-emit",
+      action: "commission_dispute_freeze",
+      targetType: "commission",
+      targetId: c.id,
+      afterState: { dispute_id: disputeId, status: "disputed" },
+      reason: `stripe_dispute=${disputeId}; reason=${reason}; emit_from=linkchinamed-web`,
+    });
+
+    // commission_amount is stored as integer cents (migration 20260713000002);
+    // convert at the cents→display boundary here.
+    await notifyKolDisputed({
+      promoterId: c.promoter_id,
+      commissionId: c.id,
+      amount: ((Number(c.commission_amount ?? 0)) / 100).toFixed(2),
+      disputeReason: reason,
+    }).catch((e) =>
+      logger.error({ error: (e as Error).message }, "notifyKolDisputed failed"),
+    );
+  }
+
+  // Best-effort ops alert (always, even when 0 commissions match — an
+  // unmatched dispute still needs ops eyes).
+  await notifyAdminDispute({
+    commissionId: orderId,
+    reason,
+  }).catch((e) =>
+    logger.error({ error: (e as Error).message }, "notifyAdminDispute failed"),
+  );
+
+  logger.info({ orderId, disputeId, count }, "order disputed event processed");
+  res.json({ success: true, commissionsFrozen: count });
+}
+
+export async function onOrderDisputeResolved(req: Request, res: Response) {
+  const { disputeId, orderId, outcome } = OrderDisputeResolvedSchema.parse(req.body);
+
+  const commissions = await getCommissionsForOrder(orderId);
+  if (commissions.length === 0) {
+    logger.info({ orderId, disputeId }, "no commissions for dispute resolution");
+    return res.json({ success: true, commissionsResolved: 0 });
+  }
+
+  const won = outcome === "won" || outcome === "warning_closed";
+  const now = new Date().toISOString();
+  let count = 0;
+
+  for (const c of commissions) {
+    if (c.dispute_id !== disputeId) continue;
+    if (c.dispute_closed_at) continue; // idempotent
+
+    const wasPaid = !!c.paid_at;
+    let targetStatus: "approved" | "paid" | "reversed" | "voided";
+    if (won) {
+      targetStatus = wasPaid ? "paid" : "approved";
+    } else {
+      targetStatus = wasPaid ? "reversed" : "voided";
+    }
+
+    // Stripe transfer reversal FIRST for lost + paid. If it fails, leave
+    // the commission in 'disputed' for manual ops follow-up — never flip
+    // status to 'reversed' without money actually moving.
+    if (!won && wasPaid && c.stripe_transfer_id) {
+      try {
+        await stripe.transfers.createReversal(
+          c.stripe_transfer_id,
+          {
+            metadata: {
+              commissionId: c.id,
+              disputeId,
+              reason: "dispute_lost",
+            },
+          },
+          // commission-level idempotency key — collapses concurrent
+          // re-attempts (webhook re-delivery / admin-v2 manual resolve
+          // racing) into Stripe's idempotent response.
+          { idempotencyKey: `commission-reversal-${c.id}` },
+        );
+      } catch (revErr) {
+        const errMsg = (revErr as Error).message ?? String(revErr);
+        await writeAuditLog({
+          actorId: SYSTEM_INTERNAL_ACTOR_ID,
+          actorEmail: "system@order-dispute-emit",
+          action: "commission_reversal_failed",
+          targetType: "commission",
+          targetId: c.id,
+          afterState: { transfer_id: c.stripe_transfer_id, status: "disputed" },
+          reason: `stripe_dispute=${disputeId}; reversal_error=${errMsg}`,
+        });
+        await notifyAdminDisputeReversalFailed({
+          commissionId: c.id,
+          transferId: c.stripe_transfer_id,
+          error: errMsg,
+        }).catch((e) =>
+          logger.error({ error: (e as Error).message }, "notifyAdminDisputeReversalFailed failed"),
+        );
+        // Skip the rest — commission stays 'disputed', ops gets a separate
+        // alert (NOT a 'resolved' email).
+        continue;
+      }
+    }
+
+    // Conditional UPDATE — only flip if still in 'disputed'. Concurrent
+    // admin resolve or duplicate emit otherwise drops the trail.
+    const { data: updatedRows, error: updErr } = await affiliateSupabase
+      .from("commissions")
+      .update({
+        status: targetStatus,
+        dispute_status: won ? "won" : "lost",
+        dispute_closed_at: now,
+        updated_at: now,
+        ...(won ? {} : { disputed_at: null }),
+      })
+      .eq("id", c.id)
+      .in("status", ["disputed"])
+      .select("id");
+    if (updErr) throw updErr;
+
+    const updateSucceeded = Array.isArray(updatedRows) && updatedRows.length > 0;
+
+    await writeAuditLog({
+      actorId: SYSTEM_INTERNAL_ACTOR_ID,
+      actorEmail: "system@order-dispute-emit",
+      action: "commission_dispute_resolve",
+      targetType: "commission",
+      targetId: c.id,
+      afterState: {
+        dispute_id: disputeId,
+        status: targetStatus,
+        outcome,
+        update_succeeded: updateSucceeded,
+      },
+      reason: `stripe_dispute=${disputeId}; outcome=${outcome}; emit_from=linkchinamed-web`,
+    });
+
+    await notifyAdminDisputeResolved({
+      commissionId: c.id,
+      action: won ? "won" : "lost",
+      note: `stripe_dispute=${disputeId}; outcome=${outcome}`,
+    }).catch((e) =>
+      logger.error({ error: (e as Error).message }, "notifyAdminDisputeResolved failed"),
+    );
+
+    count++;
+  }
+
+  logger.info({ orderId, disputeId, outcome, count }, "order dispute resolved event processed");
+  res.json({ success: true, commissionsResolved: count });
 }
