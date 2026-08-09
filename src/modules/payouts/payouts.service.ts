@@ -472,13 +472,23 @@ export async function resolveDispute(
 ): Promise<{ success: boolean; error?: string }> {
   const { data: existing, error: existingErr } = await affiliateSupabase
     .from("commissions")
-    .select("id, status, dispute_id")
+    .select("id, status, dispute_id, paid_at")
     .eq("id", commissionId)
     .maybeSingle();
   if (existingErr) return { success: false, error: "DB_ERROR" };
   if (!existing) return { success: false, error: "COMMISSION_NOT_FOUND" };
   if (existing.status !== "disputed") {
     return { success: false, error: "COMMISSION_NOT_DISPUTED" };
+  }
+  // R2 audit Fix Q8: refuse admin "lost" on paid commissions. The
+  // webhook path is responsible for clawback via stripe.transfers.
+  // If admin takes the manual override route on an already-paid
+  // commission, we MUST escalate — silently voiding leaves money
+  // clawed back to nowhere. Admin should contact ops for manual
+  // Stripe refund + status='reversed' via a separate ops endpoint
+  // (out of scope for R2).
+  if (action === "lost" && existing.paid_at) {
+    return { success: false, error: "PAID_DISPUTE_REQUIRES_OPS_REVERSAL" };
   }
 
   const finalStatus = action === "won" ? "approved" : "voided";
@@ -501,7 +511,12 @@ export async function resolveDispute(
     .eq("id", commissionId)
     .in("status", ["disputed"])
     .select("id");
-  if (error) return { success: false, error: error.message };
+  if (error) {
+    // R2 audit Fix Q13: never expose Supabase error.message to HTTP
+    // clients — log internally for ops, return opaque DB_ERROR.
+    logger.error({ err: error, commissionId }, "resolveDispute UPDATE failed");
+    return { success: false, error: "DB_ERROR" };
+  }
   if (!updatedRows || updatedRows.length === 0) {
     return { success: false, error: "COMMISSION_NOT_DISPUTED" };
   }

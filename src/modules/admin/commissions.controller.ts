@@ -37,7 +37,8 @@ export async function postDisputeResolve(req: Request, res: Response) {
       const httpStatus =
         result.error === "COMMISSION_NOT_FOUND" ? 404
           : result.error === "COMMISSION_NOT_DISPUTED" ? 409
-            : result.error === "DB_ERROR" ? 500 : 500;
+            : result.error === "PAID_DISPUTE_REQUIRES_OPS_REVERSAL" ? 409
+              : 500;
       return res.status(httpStatus).json({ error: { code: result.error } });
     }
     // R1 final review Fix 6: the webhook path already calls

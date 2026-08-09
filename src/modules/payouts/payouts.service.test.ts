@@ -21,6 +21,11 @@ const mockState = vi.hoisted(() => ({
   raceCheckError: null as string | null,
   // Task 3 (resolveDispute): captured audit log calls.
   auditLogs: [] as Array<{ action: string; actorId: string; actorEmail: string; targetId: string; afterState?: any; reason?: string }>,
+  // R2 audit Fix Q13a: per-test toggle to make the resolveDispute UPDATE
+  // return a Supabase error (simulates: constraint violation, network
+  // blip). Asserts the service returns opaque DB_ERROR instead of leaking
+  // error.message to the HTTP client.
+  resolveDisputeUpdateError: null as string | null,
 }));
 
 vi.mock("../../config.js", () => ({
@@ -115,6 +120,16 @@ vi.mock("../../config.js", () => ({
               in: (_col2: string, _vals: string[]) => ({
                 select: async (_cols: string) => {
                   mockState.commissionUpdates.push({ id: val, payload });
+                  // R2 audit Fix Q13a: per-test UPDATE error injection.
+                  // If a Supabase error is seeded (constraint violation,
+                  // network blip), return it as-is — the SUT must mask
+                  // error.message and return opaque DB_ERROR.
+                  if (mockState.resolveDisputeUpdateError) {
+                    return {
+                      data: null,
+                      error: { message: mockState.resolveDisputeUpdateError },
+                    };
+                  }
                   // Honor the concurrency guard: only return a row if the
                   // seeded commission is still in the 'disputed' state.
                   const seeded = mockState.commissionsById.get(val);
@@ -175,6 +190,7 @@ beforeEach(() => {
   mockState.commissionUpdates = [];
   mockState.commissionsLookupError = null;
   mockState.raceCheckError = null;
+  mockState.resolveDisputeUpdateError = null;
   mockState.auditLogs = [];
   mockState.promoterById.set("p1", {
     stripe_account_id: "acct_1",
@@ -440,12 +456,17 @@ describe("resolveDispute — admin manual resolution (Task 3)", () => {
     expect(audit?.reason).toMatch(/evidence accepted/);
   });
 
-  it("admin 'lost' transitions disputed → voided (NOT reversed, even if paid_at was set)", async () => {
+  it("admin 'lost' transitions disputed → voided (NOT reversed, when NOT paid)", async () => {
     // Critical: admin path must NOT call stripe.transfers.createReversal.
     // The webhook handles lost + wasPaid; admin endpoint is for stuck
     // disputes. Reverse path would be a separate bug.
+    //
+    // R2 audit Fix Q8: the (paid_at set + lost) variant is now refused
+    // upstream with PAID_DISPUTE_REQUIRES_OPS_REVERSAL — see the Q8 test
+    // below. This test covers the still-valid "lost + NOT paid" path:
+    // admin overrides an unpaid stuck dispute and voids it.
     mockState.commissionsById = new Map<string, any>([
-      ["c1", { id: "c1", status: "disputed", dispute_id: "dp_1", paid_at: "2026-08-01T00:00:00Z" }],
+      ["c1", { id: "c1", status: "disputed", dispute_id: "dp_1", paid_at: null }],
     ]);
 
     const result = await resolveDispute("c1", "lost", undefined, "admin_1", "ops@example.com");
@@ -549,6 +570,55 @@ describe("resolveDispute — admin manual resolution (Task 3)", () => {
     const result = await resolveDispute("c_race", "won", undefined, "admin_1", "ops@example.com");
     expect(result.success).toBe(false);
     expect(result.error).toBe("COMMISSION_NOT_DISPUTED");
+  });
+
+  // R2 audit Fix Q8: admin 'lost' on a paid commission must NOT silently
+  // flip status to 'voided' — the Stripe transfer has already moved
+  // money, and the void leaves no clawback path. Refuse with a 409
+  // (PAID_DISPUTE_REQUIRES_OPS_REVERSAL) and force ops escalation.
+  // The 'won' path is unaffected (paid commission whose dispute is
+  // won correctly reverts to 'approved' in the next payout cycle).
+  it("(Q8) admin 'lost' on a paid commission refuses with PAID_DISPUTE_REQUIRES_OPS_REVERSAL (no UPDATE)", async () => {
+    mockState.commissionsById = new Map<string, any>([
+      ["c_paid", {
+        id: "c_paid", status: "disputed", dispute_id: "dp_paid",
+        paid_at: "2026-08-01T10:00:00Z", stripe_transfer_id: "tr_paid",
+      }],
+    ]);
+
+    const result = await resolveDispute("c_paid", "lost", undefined, "admin_1", "ops@example.com");
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("PAID_DISPUTE_REQUIRES_OPS_REVERSAL");
+    // No UPDATE was attempted — the guard fires before the .update() call.
+    expect(mockState.commissionUpdates).toHaveLength(0);
+    // No audit row either — escalation is the controller's job (409).
+    expect(mockState.auditLogs).toHaveLength(0);
+  });
+
+  // R2 audit Fix Q13a: when the Supabase UPDATE itself returns an error
+  // (constraint violation, network blip), resolveDispute must NOT echo
+  // error.message verbatim to the HTTP client — that would leak
+  // internal schema names (e.g. "duplicate key value violates unique
+  // constraint \"foo\""). Return opaque DB_ERROR; the raw error is
+  // logged internally for ops.
+  it("(Q13a) Supabase UPDATE error → opaque DB_ERROR, error.message NOT exposed to caller", async () => {
+    mockState.commissionsById = new Map<string, any>([
+      ["c1", { id: "c1", status: "disputed", dispute_id: "dp_1" }],
+    ]);
+    mockState.resolveDisputeUpdateError =
+      'duplicate key value violates unique constraint "email_templates_category_lang_uniq"';
+
+    const result = await resolveDispute("c1", "won", undefined, "admin_1", "ops@example.com");
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("DB_ERROR");
+    // Critical: the raw Supabase message must NOT be in the returned error.
+    expect(result.error).not.toMatch(/email_templates/);
+    expect(result.error).not.toMatch(/duplicate key/);
+    // The original UPDATE was attempted (the guard fires inside the
+    // try-block, not before it).
+    expect(mockState.commissionUpdates).toHaveLength(1);
   });
 });
 
