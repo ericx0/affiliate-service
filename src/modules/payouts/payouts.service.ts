@@ -178,10 +178,24 @@ export async function payPromoterGroup(
   // splitting it (splitting would inflate Stripe fees and complicate the
   // idempotency model — the non-disputed subset will be picked up next
   // month when its status returns to 'approved').
-  const { data: refreshed } = await affiliateSupabase
+  //
+  // R1 final review Fix 5: bail out if Supabase returns an error here.
+  // The previous code discarded `error` and would have proceeded to
+  // stripe.transfers.create() even when the race-check itself failed
+  // (network/RLS hiccup), potentially paying a row that was already
+  // flipped to 'disputed'. Returning early is fail-closed: if we
+  // can't verify, we don't pay.
+  const { data: refreshed, error: raceErr } = await affiliateSupabase
     .from("commissions")
     .select("id, status")
     .in("id", sortedIds);
+  if (raceErr) {
+    logger.error(
+      { err: raceErr, promoterId, sortedIds },
+      "payPromoterGroup race-check re-fetch failed; aborting transfer (fail-closed)",
+    );
+    return { success: false, error: "RACE_CHECK_FAILED" };
+  }
   const racedDisputed = (refreshed ?? []).filter((c: any) => c.status === "disputed");
   if (racedDisputed.length > 0) {
     logger.warn(
@@ -458,13 +472,23 @@ export async function resolveDispute(
 ): Promise<{ success: boolean; error?: string }> {
   const { data: existing, error: existingErr } = await affiliateSupabase
     .from("commissions")
-    .select("id, status, dispute_id")
+    .select("id, status, dispute_id, paid_at")
     .eq("id", commissionId)
     .maybeSingle();
   if (existingErr) return { success: false, error: "DB_ERROR" };
   if (!existing) return { success: false, error: "COMMISSION_NOT_FOUND" };
   if (existing.status !== "disputed") {
     return { success: false, error: "COMMISSION_NOT_DISPUTED" };
+  }
+  // R2 audit Fix Q8: refuse admin "lost" on paid commissions. The
+  // webhook path is responsible for clawback via stripe.transfers.
+  // If admin takes the manual override route on an already-paid
+  // commission, we MUST escalate — silently voiding leaves money
+  // clawed back to nowhere. Admin should contact ops for manual
+  // Stripe refund + status='reversed' via a separate ops endpoint
+  // (out of scope for R2).
+  if (action === "lost" && existing.paid_at) {
+    return { success: false, error: "PAID_DISPUTE_REQUIRES_OPS_REVERSAL" };
   }
 
   const finalStatus = action === "won" ? "approved" : "voided";
@@ -487,7 +511,12 @@ export async function resolveDispute(
     .eq("id", commissionId)
     .in("status", ["disputed"])
     .select("id");
-  if (error) return { success: false, error: error.message };
+  if (error) {
+    // R2 audit Fix Q13: never expose Supabase error.message to HTTP
+    // clients — log internally for ops, return opaque DB_ERROR.
+    logger.error({ err: error, commissionId }, "resolveDispute UPDATE failed");
+    return { success: false, error: "DB_ERROR" };
+  }
   if (!updatedRows || updatedRows.length === 0) {
     return { success: false, error: "COMMISSION_NOT_DISPUTED" };
   }

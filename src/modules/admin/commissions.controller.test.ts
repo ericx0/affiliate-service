@@ -7,11 +7,19 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockState = vi.hoisted(() => ({
   resolveDispute: vi.fn(),
+  notifyAdminDisputeResolved: vi.fn(),
   auditLogs: [] as Array<any>,
 }));
 
 vi.mock("../payouts/payouts.service.js", () => ({
   resolveDispute: (...args: any[]) => mockState.resolveDispute(...args),
+}));
+
+vi.mock("../notifications/notifications.service.js", () => ({
+  // R1 final review Fix 6: admin endpoint must call
+  // notifyAdminDisputeResolved on success (parity with the webhook path).
+  notifyAdminDisputeResolved: (...args: any[]) =>
+    mockState.notifyAdminDisputeResolved(...args),
 }));
 
 vi.mock("./audit.service.js", () => ({
@@ -25,6 +33,8 @@ import { postDisputeResolve } from "./commissions.controller.js";
 
 beforeEach(() => {
   mockState.resolveDispute.mockReset();
+  mockState.notifyAdminDisputeResolved.mockReset();
+  mockState.notifyAdminDisputeResolved.mockResolvedValue(undefined);
   mockState.auditLogs = [];
 });
 
@@ -152,5 +162,51 @@ describe("postDisputeResolve — admin controller (Task 3 r1)", () => {
     await postDisputeResolve(req, res as any);
     expect(res.statusCode).toBe(400);
     expect(res.body.error.code).toBe("MISSING_ID");
+  });
+
+  // R1 final review Fix 6: admin endpoint now calls
+  // notifyAdminDisputeResolved on success, matching the webhook path.
+  // Without this, ops only saw an audit row — no email — when an admin
+  // manually resolved a stuck dispute.
+  it("(Fix 6) on successful resolve, calls notifyAdminDisputeResolved with the same commissionId/action/note", async () => {
+    mockState.resolveDispute.mockResolvedValue({ success: true });
+    const req = fakeReq(
+      { action: "won", note: "evidence accepted" },
+      { id: "admin_real", email: "real@linkchinamed.com" },
+    );
+    const res = fakeRes();
+    await postDisputeResolve(req as any, res as any);
+    expect(res.statusCode).toBe(200);
+    expect(mockState.notifyAdminDisputeResolved).toHaveBeenCalledTimes(1);
+    expect(mockState.notifyAdminDisputeResolved).toHaveBeenCalledWith({
+      commissionId: "c1",
+      action: "won",
+      note: "evidence accepted",
+    });
+  });
+
+  it("(Fix 6) on failed resolve, does NOT call notifyAdminDisputeResolved", async () => {
+    mockState.resolveDispute.mockResolvedValue({ success: false, error: "COMMISSION_NOT_DISPUTED" });
+    const req = fakeReq({ action: "won" }, { id: "admin_1", email: "ops@example.com" });
+    const res = fakeRes();
+    await postDisputeResolve(req as any, res as any);
+    expect(res.statusCode).toBe(409);
+    expect(mockState.notifyAdminDisputeResolved).not.toHaveBeenCalled();
+  });
+
+  // R2 audit Fix Q8 (controller wiring): admin 'lost' on an already-
+  // paid commission returns 409 PAID_DISPUTE_REQUIRES_OPS_REVERSAL.
+  // Service refused with this code; controller maps it to 409 (same as
+  // COMMISSION_NOT_DISPUTED) so the client gets a clear escalation
+  // signal. The old degenerate ternary `500 : 500` would have
+  // incorrectly returned 500 here.
+  it("(Q8 controller) PAID_DISPUTE_REQUIRES_OPS_REVERSAL → 409 with the same code", async () => {
+    mockState.resolveDispute.mockResolvedValue({ success: false, error: "PAID_DISPUTE_REQUIRES_OPS_REVERSAL" });
+    const req = fakeReq({ action: "lost" }, { id: "admin_1", email: "ops@example.com" });
+    const res = fakeRes();
+    await postDisputeResolve(req as any, res as any);
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error.code).toBe("PAID_DISPUTE_REQUIRES_OPS_REVERSAL");
+    expect(mockState.notifyAdminDisputeResolved).not.toHaveBeenCalled();
   });
 });

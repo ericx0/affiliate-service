@@ -131,6 +131,7 @@ import {
   resendAgentInvite,
   notifyKolCommissionPaid,
   notifyKolCommissionPending,
+  notifyKolDisputed,
   notifyKolPayoutSent,
   notifyKolNewReferral,
 } from "./notifications.service.js";
@@ -416,6 +417,48 @@ describe("notifyKolNewReferral (templated)", () => {
     expect(body).toContain("Hi K, someone signed up via your link.");
     expect(state.emailSendInserts).toHaveLength(1);
     expect(state.emailSendInserts[0].category).toBe("new_referral");
+  });
+});
+
+// R1 final review Fix 2: {{name}} and {{dispute_reason}} in the KOL email
+// are user/Stripe-controlled (promoters.name is KOL-edited; dispute.reason
+// is Stripe-supplied free-text). The substitution helper must HTML-escape
+// them BEFORE rendering into the email body, otherwise an attacker KOL
+// can inject <script> via their profile name and phish other admins
+// (the email is sent to the KOL themselves; not auto-forwarded to others,
+// but still bad form — and the admin's html_safety net only protects
+// admin-notify paths).
+describe("notifyKolDisputed — R1 XSS escape for {{name}} and {{dispute_reason}} (Fix 2)", () => {
+  it("HTML-escapes attacker-controlled name + Stripe dispute_reason before substitution", async () => {
+    state.templateRow = {
+      id: "tmpl-disputed",
+      subject: "Dispute for {{name}} — {{amount}} {{currency}}",
+      body: '<p>Hi {{name}}, your commission {{commission_id}} is disputed: {{dispute_reason}}.</p>',
+    };
+    state.promoterSnapshot = {
+      id: "p-xss",
+      email: "kol@example.com",
+      // Attacker-controlled value (KOL edits their profile name).
+      name: "<script>alert(1)</script>",
+      preferred_locale: "en",
+    };
+
+    await notifyKolDisputed({
+      promoterId: "p-xss",
+      commissionId: "cm-xss-payload-12345678",
+      amount: "50.00", // R1 Fix 1: now a pre-formatted USD string
+      disputeReason: "fraudulent\" onerror=alert(2) <img src=x>",
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const body = fetchBody();
+    // The raw attacker payload must NOT appear in the rendered body.
+    expect(body).not.toContain("<script>alert(1)</script>");
+    // It must appear as escaped HTML entities.
+    expect(body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    // Stripe-supplied dispute_reason: < > " are escaped.
+    expect(body).toContain("&lt;img src=x&gt;");
+    expect(body).not.toContain('onerror=alert(2) <img');
   });
 });
 

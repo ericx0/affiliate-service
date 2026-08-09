@@ -147,7 +147,10 @@ interface TemplatedCtx {
   email: string;
   name?: string;
   promoterId?: string;
-  amount?: number;
+  // R1 final review Fix 1: accept either number (cents or already-converted
+  // dollars from older callers) or pre-formatted USD string from the webhook
+  // boundary. Number(...).toFixed(2) normalizes both to a 2-decimal string.
+  amount?: number | string;
   currency?: string;
   orderId?: string;
   reason?: string;
@@ -204,14 +207,19 @@ async function sendKolTemplatedNotification(
   }
 
   const subCtx: Record<string, string> = {
-    name: ctx.name ?? "",
-    amount: ctx.amount !== undefined ? ctx.amount.toFixed(2) : "",
+    // R1 final review Fix 2: HTML-escape user/Stripe-controlled values
+    // before substitution. {{name}} is KOL-controlled (promoters.name
+    // edited in the KOL portal), {{dispute_reason}} is Stripe-supplied
+    // free-text, and {{commission_id}} is a UUID (safe today, but escape
+    // anyway for defense in depth).
+    name: escapeHtml(ctx.name ?? ""),
+    amount: ctx.amount !== undefined ? Number(ctx.amount).toFixed(2) : "",
     currency: ctx.currency ?? "",
     order_id: ctx.orderId ?? "",
     reason: ctx.reason ?? "",
     // Task 4: commission_disputed template placeholders.
-    commission_id: ctx.commissionId ? ctx.commissionId.slice(0, 8) : "",
-    dispute_reason: ctx.disputeReason ?? "",
+    commission_id: escapeHtml(ctx.commissionId ? ctx.commissionId.slice(0, 8) : ""),
+    dispute_reason: escapeHtml(ctx.disputeReason ?? ""),
     // F-NEW-11: substitute {{dashboard_url}} per role. Portal-URL helper
     // already returns /kol/dashboard or /agent/dashboard based on role.
     dashboard_url: dashboardUrlFor(ctx.role ?? "kol"),
@@ -395,10 +403,14 @@ export async function notifyAdminDispute(details: {
 // doesn't yet fetch commissions.currency; pulling it requires a
 // wider diff touching the stripe-webhook test mock and is out of
 // scope for the notification template task.
+//
+// R1 final review Fix 1: `amount` is now a pre-formatted USD string
+// (e.g. "50.00") passed by the webhook call site after cents → USD
+// conversion. The helper stays display-naive (no /100 knowledge).
 export async function notifyKolDisputed(details: {
   promoterId: string;
   commissionId: string;
-  amount: number;
+  amount: string;
   disputeReason: string;
 }): Promise<void> {
   if (!details.promoterId) {
@@ -449,6 +461,29 @@ export async function notifyAdminDisputeResolved(details: {
        <li><b>Note:</b> ${escapeHtml(details.note)}</li>
      </ul>
      <p>Review at <a href="https://affiliate.linkchinamed.com/admin">affiliate.linkchinamed.com/admin</a></p>`,
+  );
+}
+
+// R1 final review Fix 3: alert ops when Stripe refuses a transfer
+// reversal (dispute.lost + alreadyPaid path). The webhook leaves the
+// commission in 'disputed' state and writes a reversal_failed audit
+// row, then calls this so a human can manually claw back via Stripe
+// dashboard + update the commission.
+export async function notifyAdminDisputeReversalFailed(details: {
+  commissionId: string;
+  transferId: string;
+  error: string;
+}): Promise<void> {
+  await notifyAdmin(
+    `[Affiliate] STRIPE REVERSAL FAILED — ${details.commissionId.slice(0, 8)}`,
+    `<h2>Stripe transfer reversal failed</h2>
+     <ul>
+       <li><b>Commission:</b> <code>${escapeHtml(details.commissionId)}</code></li>
+       <li><b>Transfer:</b> <code>${escapeHtml(details.transferId)}</code></li>
+       <li><b>Status:</b> Commission left in <code>disputed</code> state pending manual intervention.</li>
+       <li><b>Error:</b> <pre>${escapeHtml(details.error)}</pre></li>
+     </ul>
+     <p>Manual ops follow-up required. Review at <a href="https://affiliate.linkchinamed.com/admin">affiliate.linkchinamed.com/admin</a></p>`,
   );
 }
 
