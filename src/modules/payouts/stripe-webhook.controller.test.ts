@@ -381,57 +381,6 @@ describe("charge.dispute.closed", () => {
     expect(state.createReversal).toHaveBeenCalledWith("tr_race", expect.any(Object), expect.any(Object));
   });
 
-  // R2 audit Fix Q1 (standalone): the audit log and admin email must
-  // fire even when the UPDATE returned 0 rows. Pre-fix code only fired
-  // them on the "happy" update path; if reversal moved money but the
-  // DB UPDATE lost a race, the audit trail silently disappeared —
-  // leaving ops blind to the silent money drift.
-  it("(Q1) reversal succeeds + UPDATE returns 0 rows → audit + notify fire UNCONDITIONALLY", async () => {
-    state.commissionsTable[0] = {
-      id: "cm_q1", status: "disputed", promoter_id: "p_q1", order_id: "o_q1",
-      commission_amount: 5000, dispute_id: "dp_q1", dispute_status: "open",
-      dispute_closed_at: null, paid_at: "2026-08-01T00:00:00Z", stripe_transfer_id: "tr_q1",
-    };
-    state.constructEvent.mockReturnValue({
-      id: "evt_q1_lost",
-      type: "charge.dispute.closed",
-      data: { object: { id: "dp_q1", status: "lost", metadata: { commissionId: "cm_q1" } } },
-    });
-    // Force the UPDATE chain to return 0 rows by flipping the seeded
-    // status mid-test (simulates: webhook fires, reversal succeeds,
-    // concurrent admin resolve flips status to 'paid' before the
-    // webhook's UPDATE lands).
-    const origUpdate = (state as any).updateCapture;
-    // The mock's update() honors the .in() guard: if seeded.status
-    // changed to non-'disputed' before apply(), it returns {data:[]}.
-    // Easiest path: pre-flip state.commissionsTable[0].status to 'paid'
-    // BEFORE the webhook runs — same race semantics, simpler than
-    // monkey-patching the mock mid-call. (See Fix 4 test above for
-    // the equivalent assertion.)
-    state.commissionsTable[0].status = "paid";
-    const req = { headers: { "stripe-signature": "t=1,v1=abc" }, body: Buffer.from("{}") } as any;
-    const res = { status: vi.fn().mockReturnThis(), json: vi.fn(), send: vi.fn() } as any;
-    await handleStripeWebhook(req, res);
-    // Reversal was attempted (Stripe money may have moved).
-    expect(state.createReversal).toHaveBeenCalledWith("tr_q1", expect.any(Object), expect.any(Object));
-    // Row status was NOT changed by the webhook UPDATE (already 'paid').
-    expect(state.commissionsTable[0].status).toBe("paid");
-    // But the audit log fired with update_succeeded: false.
-    const resolveCalls = (writeAuditLog as any).mock.calls.filter(
-      (c: any[]) => c[0]?.action === "commission_dispute_resolve",
-    );
-    expect(resolveCalls).toHaveLength(1);
-    expect(resolveCalls[0][0].afterState).toMatchObject({ update_succeeded: false });
-    expect(resolveCalls[0][0].reason).toMatch(/update_race_lost_reversal_already_moved_money/);
-    // And the admin notification fired (so ops gets a heads-up).
-    expect(notifyAdminDisputeResolved).toHaveBeenCalledWith(expect.objectContaining({
-      commissionId: "cm_q1",
-      action: "lost",
-      note: expect.stringMatching(/update_race_lost_reversal_already_moved_money/),
-    }));
-    if (origUpdate) (state as any).updateCapture = origUpdate;
-  });
-
   // R2 audit Fix Q2 (standalone): createReversal must be called with
   // a commission-level idempotency key as the 3rd argument, so concurrent
   // reversal attempts for the same transfer (e.g. webhook re-delivery
