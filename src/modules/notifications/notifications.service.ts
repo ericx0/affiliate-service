@@ -216,7 +216,7 @@ async function sendKolTemplatedNotification(
     amount: ctx.amount !== undefined ? Number(ctx.amount).toFixed(2) : "",
     currency: ctx.currency ?? "",
     order_id: ctx.orderId ?? "",
-    reason: ctx.reason ?? "",
+    reason: escapeHtml(ctx.reason ?? ""),
     // Task 4: commission_disputed template placeholders.
     commission_id: escapeHtml(ctx.commissionId ? ctx.commissionId.slice(0, 8) : ""),
     dispute_reason: escapeHtml(ctx.disputeReason ?? ""),

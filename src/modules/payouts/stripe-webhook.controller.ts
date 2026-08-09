@@ -288,7 +288,8 @@ export async function handleStripeWebhook(req: Request, res: Response) {
           break;
         }
 
-        const won = dispute.status === "won";
+        // Treat 'warning_closed' as a favorable outcome (no money was forcefully taken)
+        const won = dispute.status === "won" || dispute.status === "warning_closed";
         const wasPaid = !!existing.paid_at;
         let targetStatus: "approved" | "paid" | "reversed" | "voided";
         if (won) {
@@ -368,7 +369,10 @@ export async function handleStripeWebhook(req: Request, res: Response) {
           .from("commissions")
           .update({
             status: targetStatus,
-            dispute_status: dispute.status,
+            // Coerce non-won/lost statuses to satisfy the DB CHECK constraint.
+            // If it's a favorable closure (won or warning_closed), we record 'won'.
+            // Otherwise, we record 'lost'.
+            dispute_status: won ? "won" : "lost",
             dispute_closed_at: now,
             updated_at: now,
             // won: keep disputed_at as historical record (don't update);
