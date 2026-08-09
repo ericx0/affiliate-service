@@ -3,6 +3,7 @@ import { z } from "zod";
 import { logger } from "../../utils/logger.js";
 import { adminCtx } from "./admin.controller.js";
 import { resolveDispute } from "../payouts/payouts.service.js";
+import { notifyAdminDisputeResolved } from "../notifications/notifications.service.js";
 
 // Task 3: POST /api/affiliate/admin/commissions/:id/dispute-resolve
 const Schema = z.object({
@@ -39,6 +40,17 @@ export async function postDisputeResolve(req: Request, res: Response) {
             : result.error === "DB_ERROR" ? 500 : 500;
       return res.status(httpStatus).json({ error: { code: result.error } });
     }
+    // R1 final review Fix 6: the webhook path already calls
+    // notifyAdminDisputeResolved; the admin endpoint was silently
+    // skipping it. Keep the two paths consistent so ops always sees
+    // an audit-trail email regardless of how the dispute resolved.
+    await notifyAdminDisputeResolved({
+      commissionId: id,
+      action: parsed.data.action,
+      note: parsed.data.note ?? `admin ${ctx.adminEmail} resolved as ${parsed.data.action}`,
+    }).catch((e) =>
+      logger.error({ error: (e as Error).message, commissionId: id }, "notifyAdminDisputeResolved (admin path) failed"),
+    );
     return res.json({ success: true });
   } catch (error) {
     logger.error({ err: error, commissionId: id }, "manual dispute resolution failed");

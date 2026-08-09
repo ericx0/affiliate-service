@@ -7,6 +7,7 @@ import {
   notifyAdminPayoutFailure,
   notifyKolDisputed,
   notifyAdminDisputeResolved,
+  notifyAdminDisputeReversalFailed,
 } from "../notifications/notifications.service.js";
 import { calculateRefundDeduction } from "../commissions/refund-helpers.js";
 import { writeAuditLog } from "../admin/audit.service.js";
@@ -234,7 +235,13 @@ export async function handleStripeWebhook(req: Request, res: Response) {
             await notifyKolDisputed({
               promoterId: existing.promoter_id ?? "",
               commissionId,
-              amount: existing.commission_amount ?? 0,
+              // R1 final review Fix 1: commission_amount is stored as
+              // integer cents (see migration 20260713000002). Convert
+              // here at the cents→display boundary so the notification
+              // helper stays display-naive (no /100 knowledge). Without
+              // this, the KOL email showed e.g. "5000.00 USD" for a $50
+              // chargeback.
+              amount: ((Number(existing.commission_amount ?? 0)) / 100).toFixed(2),
               disputeReason: dispute.reason ?? "cardholder dispute",
             }).catch((e) =>
               logger.error({ error: (e as Error).message }, "notifyKolDisputed failed"),
@@ -289,25 +296,14 @@ export async function handleStripeWebhook(req: Request, res: Response) {
         } else {
           targetStatus = wasPaid ? "reversed" : "voided";
         }
-        const now = new Date().toISOString();
 
-        const { error: updErr } = await affiliateSupabase
-          .from("commissions")
-          .update({
-            status: targetStatus,
-            dispute_status: dispute.status,
-            dispute_closed_at: now,
-            updated_at: now,
-            // won: keep disputed_at as historical record (don't update);
-            // lost: clear it (dispute is finalized, no longer "open")
-            ...(won ? {} : { disputed_at: null }),
-          })
-          .eq("id", commissionId);
-        if (updErr) throw updErr;
-
-        // Stripe transfer reversal for lost + wasPaid. Idempotent via
-        // transfer.idempotency_key on Stripe side; safe to re-fire on
-        // duplicate webhook delivery.
+        // R1 final review Fix 3: attempt Stripe transfer reversal FIRST
+        // for lost+wasPaid. If it fails, leave the commission in
+        // 'disputed' state and alert ops — do NOT flip the status to
+        // 'reversed' (which would silently drop the unpaid transfer).
+        // The pre-fix code flipped status before the reversal attempt
+        // and swallowed the reversal error → commission marked
+        // 'reversed' but KOL's Stripe balance never clawed back.
         if (!won && wasPaid && existing.stripe_transfer_id) {
           try {
             await stripe.transfers.createReversal(existing.stripe_transfer_id, {
@@ -322,14 +318,60 @@ export async function handleStripeWebhook(req: Request, res: Response) {
               "Stripe transfer reversed on dispute.lost",
             );
           } catch (revErr) {
+            const errMsg = (revErr as Error).message ?? String(revErr);
             logger.error(
               { err: revErr, commissionId, transferId: existing.stripe_transfer_id },
-              "transfer reversal failed; manual ops follow-up required",
+              "transfer reversal failed; leaving commission in 'disputed' for manual ops follow-up",
             );
-            // Don't throw — commission status is already updated; ops must
-            // claw back manually. The error is logged + audit + admin
-            // notification below.
+            await writeAuditLog({
+              actorId: SYSTEM_WEBHOOK_ACTOR_ID,
+              actorEmail: "system@stripe-webhook",
+              action: "commission_reversal_failed",
+              targetType: "commission",
+              targetId: commissionId,
+              afterState: { transfer_id: existing.stripe_transfer_id, status: "disputed" },
+              reason: `stripe_dispute=${dispute.id}; reversal_error=${errMsg}`,
+            });
+            await notifyAdminDisputeReversalFailed({
+              commissionId,
+              transferId: existing.stripe_transfer_id,
+              error: errMsg,
+            }).catch((e) =>
+              logger.error({ error: (e as Error).message }, "notifyAdminDisputeReversalFailed failed"),
+            );
+            // Skip the rest of the resolution: status stays 'disputed',
+            // admin gets a separate ops alert (NOT a 'resolved' email).
+            break;
           }
+        }
+
+        const now = new Date().toISOString();
+
+        // R1 final review Fix 4: conditional UPDATE — only flip if the
+        // commission is still in 'disputed' status. Without the .in()
+        // guard, a re-delivered event (or a concurrent admin resolve)
+        // could race-resolve a row that was already settled.
+        const { data: updatedRows, error: updErr } = await affiliateSupabase
+          .from("commissions")
+          .update({
+            status: targetStatus,
+            dispute_status: dispute.status,
+            dispute_closed_at: now,
+            updated_at: now,
+            // won: keep disputed_at as historical record (don't update);
+            // lost: clear it (dispute is finalized, no longer "open")
+            ...(won ? {} : { disputed_at: null }),
+          })
+          .eq("id", commissionId)
+          .in("status", ["disputed"])
+          .select("id");
+        if (updErr) throw updErr;
+        if (!updatedRows || updatedRows.length === 0) {
+          logger.warn(
+            { commissionId, disputeId: dispute.id },
+            "charge.dispute.closed: commission no longer 'disputed' (race lost); skipping resolve",
+          );
+          break;
         }
 
         logger.warn(

@@ -178,10 +178,24 @@ export async function payPromoterGroup(
   // splitting it (splitting would inflate Stripe fees and complicate the
   // idempotency model — the non-disputed subset will be picked up next
   // month when its status returns to 'approved').
-  const { data: refreshed } = await affiliateSupabase
+  //
+  // R1 final review Fix 5: bail out if Supabase returns an error here.
+  // The previous code discarded `error` and would have proceeded to
+  // stripe.transfers.create() even when the race-check itself failed
+  // (network/RLS hiccup), potentially paying a row that was already
+  // flipped to 'disputed'. Returning early is fail-closed: if we
+  // can't verify, we don't pay.
+  const { data: refreshed, error: raceErr } = await affiliateSupabase
     .from("commissions")
     .select("id, status")
     .in("id", sortedIds);
+  if (raceErr) {
+    logger.error(
+      { err: raceErr, promoterId, sortedIds },
+      "payPromoterGroup race-check re-fetch failed; aborting transfer (fail-closed)",
+    );
+    return { success: false, error: "RACE_CHECK_FAILED" };
+  }
   const racedDisputed = (refreshed ?? []).filter((c: any) => c.status === "disputed");
   if (racedDisputed.length > 0) {
     logger.warn(

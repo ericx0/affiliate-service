@@ -15,6 +15,10 @@ const mockState = vi.hoisted(() => ({
   commissionsById: new Map<string, any>(),
   commissionUpdates: [] as Array<{ id: string; payload: any }>,
   commissionsLookupError: null as string | null,
+  // R1 final review Fix 5: per-test toggle to make the race-check
+  // re-fetch return an error (instead of data). Triggers the new
+  // RACE_CHECK_FAILED short-circuit BEFORE any Stripe transfer.
+  raceCheckError: null as string | null,
   // Task 3 (resolveDispute): captured audit log calls.
   auditLogs: [] as Array<{ action: string; actorId: string; actorEmail: string; targetId: string; afterState?: any; reason?: string }>,
 }));
@@ -74,6 +78,10 @@ vi.mock("../../config.js", () => ({
             // payPromoterGroup race-defense re-fetch: .select("id, status").in("id", commissionIds)
             // (both share the same chain shape: select().in(...))
             in: async (_col: string, vals: string[]) => {
+              // R1 final review Fix 5: per-test race-check error injection.
+              if (mockState.raceCheckError) {
+                return { data: null, error: { message: mockState.raceCheckError } };
+              }
               const rows = vals.map((id) => {
                 const seeded = mockState.commissionsById.get(id);
                 if (seeded) return seeded;
@@ -166,6 +174,7 @@ beforeEach(() => {
   mockState.commissionsById.clear();
   mockState.commissionUpdates = [];
   mockState.commissionsLookupError = null;
+  mockState.raceCheckError = null;
   mockState.auditLogs = [];
   mockState.promoterById.set("p1", {
     stripe_account_id: "acct_1",
@@ -380,6 +389,21 @@ describe("payPromoterGroup — gate 6 (Task 3) Layer B: race-condition defense",
     // No Stripe transfer was attempted.
     expect(mockState.stripeTransfersCreate).not.toHaveBeenCalled();
     // No transition() calls — the dispute guard fired before any DB writes.
+    expect(mockState.transitions).toHaveLength(0);
+  });
+
+  // R1 final review Fix 5: race-check re-fetch itself returns an error
+  // (network/RLS hiccup). Pre-fix code discarded `error` and proceeded
+  // to stripe.transfers.create(), risking a payout to a row that may
+  // have been flipped to 'disputed' between the SELECT and the re-fetch.
+  // New code fails closed: refuse to pay when we can't verify.
+  it("race-check returns an error → fail-closed with RACE_CHECK_FAILED, NO Stripe transfer (Fix 5)", async () => {
+    mockState.raceCheckError = "connection refused";
+    const result = await payPromoterGroup("p1", "USD", ["c1"], 5000);
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("RACE_CHECK_FAILED");
+    expect(mockState.stripeTransfersCreate).not.toHaveBeenCalled();
+    // No transition() — fail-closed before any DB writes.
     expect(mockState.transitions).toHaveLength(0);
   });
 });
