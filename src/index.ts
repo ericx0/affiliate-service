@@ -34,6 +34,7 @@ const app = express();
 app.use(cors({
   origin: [
     "https://affiliate.linkchinamed.com",
+    "https://agent.linkchinamed.com",
     "https://adminss.linkchinamed.com",
     "https://adminv2.linkchinamed.com",
   ],
