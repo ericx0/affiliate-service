@@ -137,4 +137,24 @@ describe("checkEmail", () => {
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({ exists: true, role: "kol", registered: true });
   });
+
+  it("returns a registered agent match", async () => {
+    state.rpcData = [{ role: "agent", registered: true }];
+    const { req, res } = makeReqRes({ email: "agent@example.com", token: "valid" });
+
+    await checkEmail(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ exists: true, role: "agent", registered: true });
+  });
+
+  it("returns the anti-enumeration response for an inactive promoter", async () => {
+    state.rpcData = [{ role: null, registered: false }];
+    const { req, res } = makeReqRes({ email: "inactive@example.com", token: "valid" });
+
+    await checkEmail(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ exists: false, role: null, registered: false });
+  });
 });

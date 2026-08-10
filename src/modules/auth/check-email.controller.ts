@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { z } from "zod";
 import { supabase } from "../../config.js";
+import { internalError } from "../../utils/controller-error.js";
 import { logger } from "../../utils/logger.js";
 
 const QuerySchema = z.object({
@@ -67,8 +68,7 @@ export async function checkEmail(req: Request, res: Response): Promise<void> {
   );
 
   if (error) {
-    logger.error({ err: error, email: parsed.data.email }, "check_email_exists RPC failed");
-    res.status(500).json({ error: { code: "CHECK_FAILED", message: "Email check failed" } });
+    internalError(res, "CHECK_FAILED", error, { email: parsed.data.email });
     return;
   }
 

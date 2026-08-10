@@ -39,7 +39,7 @@ app.use(cors({
     "https://adminv2.linkchinamed.com",
   ],
   methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-TOTP-Code"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-TOTP-Code", "X-Turnstile-Token"],
   credentials: false,
 }));
 
@@ -112,7 +112,7 @@ app.use("/api/affiliate/orders", hmacMiddleware(env.LCM_AFFILIATE_SECRET), order
 app.use("/api/affiliate/clicks", clickLimiter, clicksRouter);  // public — no HMAC/JWT
 app.use("/api/affiliate/admin", authLimiter, adminRouter);   // adminAuthMiddleware inside adminRouter
 app.use("/api/affiliate/promoters", authLimiter, promotersRouter);  // adminAuthMiddleware inside promotersRouter
-app.use("/api/affiliate/auth", checkEmailRouter);
+app.use("/api/affiliate/auth", authLimiter, checkEmailRouter);
 app.use("/api/affiliate/auth/admin", authLimiter, adminAuthRouter);
 app.use("/api/affiliate/me", authLimiter, meRouter);
 app.use("/api/affiliate", authLimiter, codesRouter);
