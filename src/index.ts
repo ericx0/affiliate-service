@@ -12,6 +12,7 @@ import { clicksRouter } from "./modules/clicks/clicks.routes.js";
 import { adminRouter } from "./modules/admin/admin.routes.js";
 import { promotersRouter } from "./modules/promoters/promoters.routes.js";
 import { adminAuthRouter } from "./modules/auth/auth.routes.js";
+import { checkEmailRouter } from "./modules/auth/check-email.routes.js";
 import { meRouter } from "./modules/me/me.routes.js";
 import { codesRouter } from "./modules/codes/codes.routes.js";
 import { registerRouter } from "./modules/auth/register.routes.js";
@@ -111,6 +112,7 @@ app.use("/api/affiliate/orders", hmacMiddleware(env.LCM_AFFILIATE_SECRET), order
 app.use("/api/affiliate/clicks", clickLimiter, clicksRouter);  // public — no HMAC/JWT
 app.use("/api/affiliate/admin", authLimiter, adminRouter);   // adminAuthMiddleware inside adminRouter
 app.use("/api/affiliate/promoters", authLimiter, promotersRouter);  // adminAuthMiddleware inside promotersRouter
+app.use("/api/affiliate/auth", checkEmailRouter);
 app.use("/api/affiliate/auth/admin", authLimiter, adminAuthRouter);
 app.use("/api/affiliate/me", authLimiter, meRouter);
 app.use("/api/affiliate", authLimiter, codesRouter);
