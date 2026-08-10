@@ -32,7 +32,8 @@ vi.mock("../../config.js", () => ({
     RESEND_API_KEY: "test-key",
     MAIL_FROM: "test@example.com",
     ADMIN_NOTIFY_EMAIL: "admin@example.com",
-    PORTAL_URL: "https://portal.example.com",
+    PORTAL_URL: "https://kol.example.com",
+    AGENT_PORTAL_URL: "https://agent.example.com",
   },
   supabase: {
     auth: {
@@ -483,7 +484,7 @@ describe("notifyKolCommissionPaid (templated) — F-NEW-11 dashboard_url", () =>
     });
 
     const body = fetchBody();
-    expect(body).toContain("https://portal.example.com/kol/dashboard");
+    expect(body).toContain("https://kol.example.com/dashboard");
     expect(body).not.toContain("{{dashboard_url}}");
     expect(state.emailSendInserts).toHaveLength(1);
     expect(state.emailSendInserts[0].category).toBe("commission_paid");
@@ -506,7 +507,7 @@ describe("notifyKolCommissionPaid (templated) — F-NEW-11 dashboard_url", () =>
     });
 
     const body = fetchBody();
-    expect(body).toContain("https://portal.example.com/agent/dashboard");
+    expect(body).toContain("https://agent.example.com/dashboard");
     expect(body).not.toContain("{{dashboard_url}}");
   });
 
@@ -526,7 +527,7 @@ describe("notifyKolCommissionPaid (templated) — F-NEW-11 dashboard_url", () =>
     });
 
     const body = fetchBody();
-    expect(body).toContain("https://portal.example.com/kol/dashboard");
+    expect(body).toContain("https://kol.example.com/dashboard");
   });
 });
 
