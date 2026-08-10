@@ -10,6 +10,10 @@ const EnvSchema = z.object({
   // to WEB_URL when not set (dev convenience).
   PORTAL_URL: z.string().url().optional(),
 
+  // Agent portal URL (e.g. https://agent.linkchinamed.com). Used as the base
+  // for Stripe Connect return/refresh URLs and dashboard links for agents.
+  AGENT_PORTAL_URL: z.string().url().optional(),
+
   SUPABASE_URL: z.string().url(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
 

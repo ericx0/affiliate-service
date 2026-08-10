@@ -5,24 +5,24 @@ describe("portal-urls helpers", () => {
   describe("settingsStripeReturnUrl", () => {
     it("returns KOL settings URL for role='kol'", () => {
       expect(settingsStripeReturnUrl("kol"))
-        .toBe("https://affiliate.linkchinamed.com/kol/dashboard/settings/stripe");
+        .toBe("https://affiliate.linkchinamed.com/dashboard/settings/stripe");
     });
 
-    it("returns Agent settings URL for role='agent'", () => {
+    it("returns Agent settings URL on agent portal for role='agent'", () => {
       expect(settingsStripeReturnUrl("agent"))
-        .toBe("https://affiliate.linkchinamed.com/agent/dashboard/settings/stripe");
+        .toBe("https://agent.linkchinamed.com/dashboard/settings/stripe");
     });
   });
 
   describe("dashboardUrlFor", () => {
     it("returns KOL dashboard URL for role='kol'", () => {
       expect(dashboardUrlFor("kol"))
-        .toBe("https://affiliate.linkchinamed.com/kol/dashboard");
+        .toBe("https://affiliate.linkchinamed.com/dashboard");
     });
 
-    it("returns Agent dashboard URL for role='agent'", () => {
+    it("returns Agent dashboard URL on agent portal for role='agent'", () => {
       expect(dashboardUrlFor("agent"))
-        .toBe("https://affiliate.linkchinamed.com/agent/dashboard");
+        .toBe("https://agent.linkchinamed.com/dashboard");
     });
   });
 });

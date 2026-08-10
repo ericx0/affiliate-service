@@ -12,6 +12,8 @@ export default defineConfig({
       STRIPE_SECRET_KEY: "sk_test_placeholder",
       STRIPE_WEBHOOK_SECRET: "whsec_placeholder",
       LCM_AFFILIATE_SECRET: "test-secret-32-chars-long-xxxxxx",
+      PORTAL_URL: "https://affiliate.linkchinamed.com",
+      AGENT_PORTAL_URL: "https://agent.linkchinamed.com",
       LOG_LEVEL: "warn",
     },
   },
