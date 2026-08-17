@@ -27,7 +27,59 @@ import { casesRouter } from "./modules/cases/cases.routes.js";
 import { emailTemplatesRouter } from "./modules/email-templates/email-templates.routes.js";
 import { funnelRouter } from "./modules/funnel/funnel.routes.js";
 
+function validateEnv(): void {
+  // Matches src/config.ts Zod schema — fail fast with named errors
+  // before Zod parse runs.
+  const required = [
+    "APP_URL",
+    "WEB_URL",
+    "SUPABASE_URL",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "STRIPE_SECRET_KEY",
+    "STRIPE_WEBHOOK_SECRET",
+    "LCM_AFFILIATE_SECRET",
+  ];
+  const missing = required.filter((k) => !process.env[k]?.trim());
+  if (missing.length > 0) {
+    throw new Error(
+      `[affiliate-service] Missing required env vars: ${missing.join(", ")}. Refusing to start.`
+    );
+  }
+}
+
+validateEnv();
+
+if (process.env.NODE_ENV !== "production") {
+  console.warn(`[affiliate-service] NODE_ENV=${process.env.NODE_ENV} — running in non-production mode`);
+}
+
 const app = express();
+
+// Structured request logger — logs only /api/affiliate/* traffic with
+// status, method, path, duration. Catches 4xx/5xx for alerting.
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    const durationMs = Date.now() - start;
+    const path = req.path;
+    const status = res.statusCode;
+
+    if (path.startsWith("/api/affiliate/")) {
+      console.log(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: status >= 500 ? "error" : status >= 400 ? "warn" : "info",
+          service: "affiliate-service",
+          method: req.method,
+          path,
+          status,
+          durationMs,
+        })
+      );
+    }
+  });
+  next();
+});
 
 // CORS — allow the KOL/agent/admin portals to call this service cross-origin.
 // Without this, every browser fetch fails at the preflight stage.
@@ -145,6 +197,25 @@ app.use("/api/affiliate/email-templates", authLimiter, emailTemplatesRouter);
 app.use("/api/affiliate/funnel", authLimiter, funnelRouter);
 
 app.use(errorHandler);
+
+// 5xx error handler — catches anything the upstream errorHandler missed
+// or anything that escapes sync middleware. Logs full stack + returns
+// a generic 500 to the client (no stack leak).
+app.use((err: Error, req: any, res: any, _next: any) => {
+  console.error(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level: "error",
+      service: "affiliate-service",
+      message: err.message,
+      stack: err.stack,
+      path: req.path,
+    })
+  );
+  if (!res.headersSent) {
+    res.status(500).json({ error: "internal_error" });
+  }
+});
 
 // Only start the server (listen + cron) when running as a standalone Node process.
 // On Vercel serverless, we just export the app — Vercel invokes it as a function
