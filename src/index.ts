@@ -29,15 +29,27 @@ import { funnelRouter } from "./modules/funnel/funnel.routes.js";
 
 const app = express();
 
-// CORS — allow the KOL portal to call this service cross-origin.
+// CORS — allow the KOL/agent/admin portals to call this service cross-origin.
 // Without this, every browser fetch fails at the preflight stage.
+// Wildcard for Vercel preview URLs (`-git-` branch aliases) + localhost dev.
+const corsOrigin = (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
+  if (!origin) return cb(null, true);
+  if (
+    origin === "https://affiliate.linkchinamed.com" ||
+    origin === "https://agent.linkchinamed.com" ||
+    origin === "https://adminss.linkchinamed.com" ||
+    origin === "https://adminv2.linkchinamed.com" ||
+    /^https:\/\/affiliate-(agent-portal|portal)-[a-z0-9-]+\.vercel\.app$/.test(origin) ||
+    origin === "http://localhost:3000" ||
+    origin === "http://localhost:3001" ||
+    origin === "http://localhost:3002"
+  ) {
+    return cb(null, true);
+  }
+  cb(null, false);
+};
 app.use(cors({
-  origin: [
-    "https://affiliate.linkchinamed.com",
-    "https://agent.linkchinamed.com",
-    "https://adminss.linkchinamed.com",
-    "https://adminv2.linkchinamed.com",
-  ],
+  origin: corsOrigin,
   methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "X-TOTP-Code", "X-Turnstile-Token"],
   credentials: false,
