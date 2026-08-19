@@ -190,10 +190,10 @@ async function fireCommissionTransitionEmail(
     if (toStatus !== "approved") return; // only commission_pending for now
     const { data: promoter } = await affiliateSupabase
       .from("promoters")
-      .select("email, name")
+      .select("email, name, role")
       .eq("id", commission.promoter_id)
       .maybeSingle();
-    const p = promoter as { email: string; name: string } | null;
+    const p = promoter as { email: string; name: string; role: "kol" | "agent" } | null;
     if (!p?.email) return;
     // commission_amount is stored in cents (BIGINT); convert to dollars
     // for the email body per Task 3.2 convention ("amount is dollars
@@ -205,6 +205,9 @@ async function fireCommissionTransitionEmail(
       currency: commission.currency,
       orderId: commission.order_id,
       promoterId: commission.promoter_id,
+      // F-AFF-NOTIF-1: forward role so Agent approval emails use the
+      // agent portal URL instead of defaulting to KOL.
+      role: p.role,
     });
   } catch (e) {
     logger.error({ err: (e as Error).message, commissionId: commission.id }, "fireCommissionTransitionEmail threw");

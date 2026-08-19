@@ -372,9 +372,64 @@ describe("notifyKolCommissionPending (templated)", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(state.emailSendInserts).toHaveLength(0);
   });
+
+  // F-AFF-NOTIF-1: Agent commissions (commission_type='agent_service')
+  // go through the same fireCommissionTransitionEmail path. Without the
+  // role forwarded to sendKolTemplatedNotification, {{dashboard_url}}
+  // defaults to "kol" — Agent receives a KOL-portal link in their
+  // commission notification. After the fix, role='agent' must produce
+  // an agent-portal URL in the email body.
+  it("substitutes agent portal URL when role='agent'", async () => {
+    // Override template so the {{dashboard_url}} placeholder is actually
+    // present in the rendered HTML — the default stub template body in
+    // the test fixtures doesn't include it.
+    state.templateRow = {
+      id: "tmpl-1",
+      subject: "Hi {{name}} — {{amount}} {{currency}}",
+      body: '<p><a href="{{dashboard_url}}">view dashboard</a></p>',
+    };
+    await notifyKolCommissionPending({
+      email: "agent@example.com",
+      name: "Agent One",
+      amount: 80,
+      currency: "USD",
+      orderId: "order-1",
+      promoterId: "a-1",
+      role: "agent",
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const body = fetchBody();
+    expect(body).toContain("agent.example.com");
+  });
 });
 
 describe("notifyKolPayoutSent (templated)", () => {
+  // F-AFF-NOTIF-1: same bug on the payout path — Agent gets paid via
+  // payPromoterGroup, and the payout_sent email must use the agent
+  // portal URL.
+  it("substitutes agent portal URL when role='agent'", async () => {
+    // Same override: payout template stub doesn't include
+    // {{dashboard_url}} by default.
+    state.templateRow = {
+      id: "tmpl-1",
+      subject: "Hi {{name}} — {{amount}} {{currency}}",
+      body: '<p><a href="{{dashboard_url}}">view dashboard</a></p>',
+    };
+    await notifyKolPayoutSent({
+      email: "agent@example.com",
+      name: "Agent One",
+      amount: 80,
+      currency: "USD",
+      promoterId: "a-1",
+      role: "agent",
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const body = fetchBody();
+    expect(body).toContain("agent.example.com");
+  });
+
   it("writes last_error when all 3 Resend attempts fail", async () => {
     // sendEmailWithRetry waits 1s + 4s between 3 attempts; vi.useFakeTimers
     // collapses both setTimeout waits to microtasks so the test stays

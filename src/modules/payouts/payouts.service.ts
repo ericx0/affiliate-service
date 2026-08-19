@@ -394,10 +394,10 @@ async function firePayoutSentEmail(args: {
   try {
     const { data: p } = await affiliateSupabase
       .from("promoters")
-      .select("email, name")
+      .select("email, name, role")
       .eq("id", args.promoterId)
       .maybeSingle();
-    const promoter = p as { email: string; name: string } | null;
+    const promoter = p as { email: string; name: string; role: "kol" | "agent" } | null;
     if (!promoter?.email) return;
     await notifyKolPayoutSent({
       email: promoter.email,
@@ -405,6 +405,9 @@ async function firePayoutSentEmail(args: {
       amount: args.amount,
       currency: args.currency,
       promoterId: args.promoterId,
+      // F-AFF-NOTIF-1: Agent payout email must link to the agent
+      // portal, not the KOL one.
+      role: promoter.role,
     });
   } catch (e) {
     logger.error({ err: (e as Error).message, promoterId: args.promoterId }, "firePayoutSentEmail inner threw");

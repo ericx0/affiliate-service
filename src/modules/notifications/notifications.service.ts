@@ -283,6 +283,11 @@ export async function notifyKolCommissionPending(args: {
   currency?: string;
   orderId?: string;
   promoterId?: string;
+  // F-AFF-NOTIF-1: Agent commissions reach this path too (via
+  // fireCommissionTransitionEmail when commission_type='agent_service').
+  // Without forwarding role, {{dashboard_url}} defaults to the KOL
+  // portal. Agent role selects the agent portal.
+  role?: "kol" | "agent";
 }): Promise<void> {
   await sendKolTemplatedNotification("commission_pending", args);
 }
@@ -305,6 +310,10 @@ export async function notifyKolPayoutSent(args: {
   amount?: number;
   currency?: string;
   promoterId?: string;
+  // F-AFF-NOTIF-1: payPromoterGroup fires this for both KOL and Agent
+  // groups. Forward role so Agent payout emails link to the agent
+  // portal.
+  role?: "kol" | "agent";
 }): Promise<void> {
   await sendKolTemplatedNotification("payout_sent", args);
 }
