@@ -338,6 +338,87 @@ describe("MINIMUM_PAYOUT_AMOUNT", () => {
   });
 });
 
+describe("payCommissions — minimum threshold carry-over", () => {
+  // The monthly cron path: when a promoter's group total is below the
+  // $50 minimum, NO Stripe transfer is created and the commissions
+  // stay in 'approved' state — they roll forward to next month's batch
+  // and accumulate. This is the carry-over behavior — without it, small
+  // promoters never get paid or get charged fee-erosion on micropayouts.
+
+  it("does NOT call stripe.transfers.create when group total < $50", async () => {
+    mockState.commissionsById = new Map<string, any>([
+      ["c_small", {
+        id: "c_small", promoter_id: "p1", commission_amount: 4000, // $40
+        currency: "USD", status: "approved",
+        promoters: { stripe_account_id: "acct_1", stripe_onboarding_completed: true },
+      }],
+    ]);
+
+    const result = await payCommissions(["c_small"]);
+
+    expect(mockState.stripeTransfersCreate).not.toHaveBeenCalled();
+    expect(result).toHaveLength(1);
+    expect(result[0].success).toBe(false);
+    expect(result[0].error).toMatch(/below minimum/i);
+    expect(result[0].commissionIds).toEqual(["c_small"]);
+  });
+
+  it("leaves sub-threshold commissions in 'approved' state (rolls over)", async () => {
+    mockState.commissionsById = new Map<string, any>([
+      ["c_small", {
+        id: "c_small", promoter_id: "p1", commission_amount: 4000, // $40
+        currency: "USD", status: "approved",
+        promoters: { stripe_account_id: "acct_1", stripe_onboarding_completed: true },
+      }],
+    ]);
+
+    await payCommissions(["c_small"]);
+
+    // No transition to 'paid' — commission stays approved for next month's batch.
+    const paidTransitions = mockState.transitions.filter((t) => t.to === "paid");
+    expect(paidTransitions).toHaveLength(0);
+  });
+
+  it("mixed: sub-threshold group is skipped, threshold group pays (independent)", async () => {
+    // Two promoters, same batch:
+    //   p_small — $40, should carry over
+    //   p_big   — $60, should pay out
+    // Asserts that one promoter's small balance doesn't block another's payout.
+    mockState.promoterById.set("p_big", {
+      stripe_account_id: "acct_big", stripe_onboarding_completed: true,
+    });
+    mockState.commissionsById = new Map<string, any>([
+      ["c_small", {
+        id: "c_small", promoter_id: "p_small", commission_amount: 4000,
+        currency: "USD", status: "approved",
+        promoters: { stripe_account_id: "acct_1", stripe_onboarding_completed: true },
+      }],
+      ["c_big", {
+        id: "c_big", promoter_id: "p_big", commission_amount: 6000,
+        currency: "USD", status: "approved",
+        promoters: { stripe_account_id: "acct_big", stripe_onboarding_completed: true },
+      }],
+    ]);
+
+    const result = await payCommissions(["c_small", "c_big"]);
+
+    // Exactly one transfer — for the big promoter only.
+    expect(mockState.stripeTransfersCreate).toHaveBeenCalledTimes(1);
+    expect(mockState.stripeTransfersCreate.mock.calls[0][0].destination).toBe("acct_big");
+    expect(mockState.stripeTransfersCreate.mock.calls[0][0].amount).toBe(6000);
+
+    // c_big paid, c_small carried over.
+    const paidIds = mockState.transitions.filter((t) => t.to === "paid").map((t) => t.id);
+    expect(paidIds).toEqual(["c_big"]);
+
+    const smallResult = result.find((r) => r.commissionIds?.includes("c_small"));
+    const bigResult = result.find((r) => r.commissionIds?.includes("c_big"));
+    expect(smallResult?.success).toBe(false);
+    expect(smallResult?.error).toMatch(/below minimum/i);
+    expect(bigResult?.success).toBe(true);
+  });
+});
+
 // ============================================================
 // Task 3 — Gate 6: payCommissions / payPromoterGroup must NEVER
 // pay disputed commissions. Two layers of defense:
