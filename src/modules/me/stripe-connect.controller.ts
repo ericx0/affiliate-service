@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { stripe, affiliateSupabase, env } from "../../config.js";
+import { logger } from "../../utils/logger.js";
 import { settingsStripeReturnUrl } from "../portal-urls.js";
 
 /**
@@ -96,13 +97,35 @@ export async function postMyStripeConnect(req: Request, res: Response) {
       );
       accountId = account.id;
 
-      // Persist immediately so subsequent requests see the new id
-      await affiliateSupabase.from("promoters")
-        .update({
-          stripe_account_id: accountId,
-          stripe_onboarding_completed: false,
-        })
-        .eq("id", subject.id);
+      // F-AFF-STRIPE-3: persist immediately so subsequent requests see
+      // the new id. If the DB write fails (RLS, network, transient
+      // outage) the Stripe Express account is now an orphan — without
+      // cleanup, the next request would see no stripe_account_id and
+      // create another. Best-effort delete the orphan; if THAT also
+      // fails, log and surface the original DB error so ops can
+      // reconcile manually.
+      try {
+        await affiliateSupabase.from("promoters")
+          .update({
+            stripe_account_id: accountId,
+            stripe_onboarding_completed: false,
+          })
+          .eq("id", subject.id);
+      } catch (dbErr) {
+        logger.error(
+          { err: (dbErr as Error).message, accountId, promoterId: subject.id },
+          "failed to persist stripe_account_id — cleaning up orphan Stripe account",
+        );
+        try {
+          await stripe.accounts.del(accountId);
+        } catch (delErr) {
+          logger.error(
+            { err: (delErr as Error).message, accountId },
+            "stripe.accounts.del failed during orphan cleanup — manual reconciliation required",
+          );
+        }
+        throw dbErr;
+      }
     }
 
     // 2. Create one-time account-link for onboarding / login

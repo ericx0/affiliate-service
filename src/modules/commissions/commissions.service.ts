@@ -17,7 +17,12 @@ import {
 // Published Commission Rules promise a 30-day cooling-off period before
 // commission becomes payable (absorbs refund / chargeback risk). The code
 // previously used 7 days, contradicting the policy.
-const COOL_DOWN_DAYS = 30;
+//
+// F-AFF-PAYOUT-7: applies uniformly to ALL commission types — KOL
+// (service/subscription) AND agent (agent_service/agent_subscription)
+// share the same 30-day window. Exported so commission tests can pin
+// the value rather than re-derive it from a Stripe webhook timestamp.
+export const COOL_DOWN_DAYS = 30;
 
 export const AttachOrderSchema = z.object({
   orderId: z.string().uuid(),

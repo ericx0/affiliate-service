@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { canTransition } from "./commissions.types.js";
-import { agentCommissionType } from "./commissions.service.js";
+import { agentCommissionType, COOL_DOWN_DAYS, transition } from "./commissions.service.js";
 
 // Shared mutable state so each reversePaidCommission negative-path test can
 // stage different commission rows + Stripe errors without re-initializing the
@@ -13,6 +13,14 @@ const { state } = vi.hoisted(() => ({
       cumulative_refunded_amount: 0,
     } as Record<string, any> | null,
     stripeError: null as Error | null,
+    // F-AFF-PAYOUT-7: cool-down transition tests stage a commission
+    // row in 'cooling_down' (or 'pending') and the matching promoter
+    // row for the post-transition email helper. transition() merges
+    // service_completed_at -> cool_down_until, so we capture the
+    // merged commission from .update() arguments.
+    transitionCommission: null as Record<string, any> | null,
+    transitionPromoter: null as Record<string, any> | null,
+    lastTransitionUpdate: null as Record<string, any> | null,
   },
 }));
 
@@ -38,16 +46,39 @@ vi.mock("../../config.js", () => ({
   },
   // commissions.service.ts queries affiliate.* tables via this client.
   affiliateSupabase: {
-    from: vi.fn(() => ({
-      select: vi.fn(() => ({
-        eq: vi.fn(() => ({
-          single: vi.fn(async () => ({
-            data: state.commission,
-            error: state.commission ? null : { code: "PGRST116", message: "no rows" },
-          })),
-        })),
-      })),
-    })),
+    from: (table: string) => {
+      // F-AFF-PAYOUT-7: transition() needs update().eq().in().select().single()
+      // for the commission row, plus select().eq().maybeSingle() for the
+      // promoter email lookup. Build a self-returning chain that captures
+      // the update payload and dispatches the right leaf method.
+      const chain: any = {};
+      chain.select = () => chain;
+      chain.eq = () => chain;
+      chain.in = () => chain;
+      chain.update = (row: Record<string, any>) => {
+        state.lastTransitionUpdate = row;
+        return chain;
+      };
+      chain.maybeSingle = async () => ({
+        data: table === "promoters" ? state.transitionPromoter : null,
+        error: null,
+      });
+      chain.single = async () => {
+        // If the test staged a transitionCommission, merge the captured
+        // update payload so the caller sees cool_down_until populated.
+        if (table === "commissions" && state.transitionCommission) {
+          return {
+            data: { ...state.transitionCommission, ...(state.lastTransitionUpdate ?? {}) },
+            error: null,
+          };
+        }
+        return {
+          data: state.commission,
+          error: state.commission ? null : { code: "PGRST116", message: "no rows" },
+        };
+      };
+      return chain;
+    },
   },
   stripe: {
     transfers: {
@@ -181,5 +212,74 @@ describe("reversePaidCommission", () => {
       expect.objectContaining({ amount: 10, metadata: expect.objectContaining({ eventId: "evt_005" }) }),
       { idempotencyKey: "commission-reverse-c1-evt_005" },
     );
+  });
+});
+
+// F-AFF-PAYOUT-7: explicit coverage that the 30-day cool-down window
+// applies to ALL commission types — agent_service / agent_subscription
+// share the same threshold as KOL service / subscription. Catches a
+// regression where someone introduces a per-type COOL_DOWN_DAYS (e.g.
+// "agents get 7 days") or silently flips it back to 7.
+describe("COOL_DOWN_DAYS — uniform across all commission types", () => {
+  it("is exported and pinned to 30 days", () => {
+    expect(COOL_DOWN_DAYS).toBe(30);
+  });
+
+  it("transition() computes cool_down_until as service_completed_at + 30 days for agent_service", async () => {
+    state.lastTransitionUpdate = null;
+    state.transitionCommission = {
+      id: "c_agent_svc", promoter_id: "p_agent", commission_type: "agent_service",
+      status: "pending", commission_amount: 500, currency: "USD",
+      order_id: "o_1",
+    };
+    state.transitionPromoter = { email: null, name: null, role: "agent" };
+    const completedAt = "2026-07-01T00:00:00.000Z";
+    const result = await transition(
+      "c_agent_svc", "cooling_down", { service_completed_at: completedAt },
+    );
+    expect(result.success).toBe(true);
+    const coolDownUntil = (result.commission as { cool_down_until?: string }).cool_down_until;
+    expect(coolDownUntil).toBeDefined();
+    const expected = new Date(completedAt);
+    expected.setUTCDate(expected.getUTCDate() + 30);
+    expect(new Date(coolDownUntil!).toISOString()).toBe(expected.toISOString());
+  });
+
+  it("transition() computes cool_down_until as service_completed_at + 30 days for agent_subscription", async () => {
+    state.lastTransitionUpdate = null;
+    state.transitionCommission = {
+      id: "c_agent_sub", promoter_id: "p_agent", commission_type: "agent_subscription",
+      status: "pending", commission_amount: 1200, currency: "USD",
+      order_id: "o_2",
+    };
+    state.transitionPromoter = { email: null, name: null, role: "agent" };
+    const completedAt = "2026-06-15T12:00:00.000Z";
+    const result = await transition(
+      "c_agent_sub", "cooling_down", { service_completed_at: completedAt },
+    );
+    expect(result.success).toBe(true);
+    const coolDownUntil = (result.commission as { cool_down_until?: string }).cool_down_until;
+    const expected = new Date(completedAt);
+    expected.setUTCDate(expected.getUTCDate() + 30);
+    expect(new Date(coolDownUntil!).toISOString()).toBe(expected.toISOString());
+  });
+
+  it("transition() applies the same 30-day window to KOL service (parity with agent)", async () => {
+    state.lastTransitionUpdate = null;
+    state.transitionCommission = {
+      id: "c_kol", promoter_id: "p_kol", commission_type: "service",
+      status: "pending", commission_amount: 700, currency: "USD",
+      order_id: "o_3",
+    };
+    state.transitionPromoter = { email: null, name: null, role: "kol" };
+    const completedAt = "2026-05-01T00:00:00.000Z";
+    const result = await transition(
+      "c_kol", "cooling_down", { service_completed_at: completedAt },
+    );
+    expect(result.success).toBe(true);
+    const coolDownUntil = (result.commission as { cool_down_until?: string }).cool_down_until;
+    const expected = new Date(completedAt);
+    expected.setUTCDate(expected.getUTCDate() + 30);
+    expect(new Date(coolDownUntil!).toISOString()).toBe(expected.toISOString());
   });
 });

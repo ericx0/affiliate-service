@@ -10,6 +10,7 @@ const { state } = vi.hoisted(() => ({
   state: {
     stripeAccountCreates: [] as Array<Record<string, any>>,
     stripeAccountLinkCreates: [] as Array<Record<string, any>>,
+    stripeAccountDeletes: [] as Array<string>,
     // promoter row returned by .select().single() inside the controller
     promoterRow: null as null | Record<string, any>,
     // promoter row updates captured from .update().eq()
@@ -19,6 +20,10 @@ const { state } = vi.hoisted(() => ({
     // `env.STRIPE_SECRET_KEY.startsWith("PLACEHOLDER")` check triggers
     // in dev-mock tests.
     stripeKey: "PLACEHOLDER",
+    // When set, the next update() call throws this message — used by
+    // F-AFF-STRIPE-3 (orphan account on DB update failure) tests to
+    // simulate the post-Stripe.update() failure path.
+    nextUpdateError: null as null | string,
   },
 }));
 
@@ -28,6 +33,7 @@ vi.mock("../../config.js", () => {
   // state.stripeKey without reloading the mock factory.
   const env: any = {
     NODE_ENV: "development",
+    LOG_LEVEL: "warn",
     PORTAL_URL: "https://affiliate.linkchinamed.com",
     AGENT_PORTAL_URL: "https://agent.linkchinamed.com",
   };
@@ -43,6 +49,11 @@ vi.mock("../../config.js", () => {
         chain.select = () => chain;
         chain.update = (row: Record<string, any>) => {
           state.promoterUpdates.push(row);
+          if (state.nextUpdateError) {
+            const err = new Error(state.nextUpdateError);
+            state.nextUpdateError = null;
+            throw err;
+          }
           return { eq: () => chain };
         };
         chain.eq = () => chain;
@@ -55,6 +66,10 @@ vi.mock("../../config.js", () => {
         create: async (params: Record<string, any>, opts: Record<string, any>) => {
           state.stripeAccountCreates.push({ params, opts });
           return { id: state.nextAccountId };
+        },
+        del: async (id: string) => {
+          state.stripeAccountDeletes.push(id);
+          return { id, deleted: true };
         },
       },
       accountLinks: {
@@ -99,10 +114,12 @@ function makeReqRes() {
 beforeEach(() => {
   state.stripeAccountCreates = [];
   state.stripeAccountLinkCreates = [];
+  state.stripeAccountDeletes = [];
   state.promoterRow = null;
   state.promoterUpdates = [];
   state.nextAccountId = "acct_test_001";
   state.stripeKey = "PLACEHOLDER";
+  state.nextUpdateError = null;
 });
 
 describe("postMyStripeConnect with kolOrAgentAuthMiddleware", () => {
@@ -192,6 +209,70 @@ describe("postMyStripeConnect with kolOrAgentAuthMiddleware", () => {
     // No Stripe API calls in dev-mock mode
     expect(state.stripeAccountCreates).toHaveLength(0);
     expect(state.stripeAccountLinkCreates).toHaveLength(0);
+  });
+
+  // F-AFF-STRIPE-3: orphan Connect account when the DB update that
+  // records the new account id fails. The Stripe Express account
+  // exists in Stripe but the promoter row never links to it — next
+  // request sees no stripe_account_id and creates ANOTHER one. Without
+  // the cleanup the promoter ends up with N orphaned accounts in Stripe
+  // and dashboard links pointing at whichever the controller returns.
+  it("live mode — deletes orphan Stripe account when DB update fails after accounts.create", async () => {
+    state.stripeKey = "sk_test_real_key";
+    state.nextUpdateError = "DB write failed";
+    const { req, res } = makeReqRes();
+    req.subject = {
+      id: "a_orphan",
+      email: "orphan@example.com",
+      name: "Orphan Test",
+      status: "active",
+      role: "agent",
+      country_code: "US",
+    };
+    state.promoterRow = {
+      id: "a_orphan",
+      role: "agent",
+      agent_level: 1,
+      stripe_account_id: null,
+    };
+    await postMyStripeConnect(req, res);
+    // Account was created in Stripe first
+    expect(state.stripeAccountCreates).toHaveLength(1);
+    expect(state.stripeAccountCreates[0].params.metadata.promoter_id).toBe("a_orphan");
+    // Then DB update failed → controller MUST clean up the orphan
+    expect(state.stripeAccountDeletes).toEqual(["acct_test_001"]);
+    // And surface 500 so the client knows onboarding failed
+    expect(res.statusCode).toBe(500);
+    expect(res.body.error.code).toBe("STRIPE_ERROR");
+    // No link was issued (link creation never runs because update threw)
+    expect(state.stripeAccountLinkCreates).toHaveLength(0);
+  });
+
+  it("live mode — existing stripe_account_id path does NOT touch accounts.create or accounts.del", async () => {
+    state.stripeKey = "sk_test_real_key";
+    state.nextUpdateError = "should not be hit (existing-account path skips update)";
+    const { req, res } = makeReqRes();
+    req.subject = {
+      id: "a_existing",
+      email: "existing@example.com",
+      name: "Existing Test",
+      status: "active",
+      role: "kol",
+      country_code: "US",
+    };
+    state.promoterRow = {
+      id: "a_existing",
+      role: "kol",
+      agent_level: null,
+      stripe_account_id: "acct_existing",
+    };
+    await postMyStripeConnect(req, res);
+    // Existing account path should reuse the id — no create, no del
+    expect(state.stripeAccountCreates).toHaveLength(0);
+    expect(state.stripeAccountDeletes).toHaveLength(0);
+    // And accountLink was issued for the existing account
+    expect(state.stripeAccountLinkCreates).toHaveLength(1);
+    expect(state.stripeAccountLinkCreates[0].account).toBe("acct_existing");
   });
 
   it("live mode — role='agent' creates Stripe Express account and accountLink", async () => {

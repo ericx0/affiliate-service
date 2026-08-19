@@ -69,8 +69,15 @@ vi.mock("../utils/logger.js", () => ({
 
 import { kolAuthMiddleware } from "./kol-auth.js";
 
-function makeReqRes() {
-  const req: any = { headers: { authorization: "Bearer test-jwt" } };
+// Counter so each call gets a unique JWT — authCache is module-scoped
+// with 30s TTL, and reusing 'Bearer test-jwt' across tests means the
+// first review-status case (active) populates the cache, and subsequent
+// suspended/blacklisted/no-promoter cases hit cache and call next()
+// with the stale active promoter. Force cache miss per test.
+let jwtCounter = 0;
+function makeReqRes(overrideJwt?: string) {
+  const jwt = overrideJwt ?? `test-jwt-${++jwtCounter}`;
+  const req: any = { headers: { authorization: `Bearer ${jwt}` } };
   const res: any = {
     statusCode: 0,
     body: undefined as any,
