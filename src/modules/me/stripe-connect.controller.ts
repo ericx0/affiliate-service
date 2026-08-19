@@ -5,22 +5,24 @@ import { settingsStripeReturnUrl } from "../portal-urls.js";
 /**
  * POST /me/stripe-connect
  *
- * Create (or reuse) a Stripe Connect Express account for the KOL and
- * return a one-time account-link URL for the browser to redirect to.
+ * Create (or reuse) a Stripe Connect Express account for the
+ * authenticated subject (KOL or Agent — both earn commissions and
+ * need Connect onboarding to receive payouts) and return a one-time
+ * account-link URL for the browser to redirect to.
  *
  * In dev (when STRIPE_SECRET_KEY is missing or starts with
  * PLACEHOLDER), returns a mock URL pointing at /dev/stripe-mock
  * so the front-end flow can be exercised without real Stripe keys.
  *
  * Account creation is idempotent on promoter.stripe_account_id —
- * re-running for an already-onboarded KOL just returns a fresh
+ * re-running for an already-onboarded subject just returns a fresh
  * login link.
  */
 export async function postMyStripeConnect(req: Request, res: Response) {
-  const promoter = req.promoter;
-  if (!promoter) {
+  const subject = req.subject;
+  if (!subject) {
     res.status(401).json({
-      error: { code: "UNAUTHORIZED", message: "Missing promoter context" },
+      error: { code: "UNAUTHORIZED", message: "Missing subject context" },
     });
     return;
   }
@@ -28,14 +30,15 @@ export async function postMyStripeConnect(req: Request, res: Response) {
   // Read latest stripe_account_id (auth middleware doesn't include it)
   const { data: p } = await affiliateSupabase.from("promoters")
     .select("stripe_account_id, role, agent_level")
-    .eq("id", promoter.id)
+    .eq("id", subject.id)
     .single();
   const existingAccountId = p?.stripe_account_id ?? null;
+  const role = (p?.role || subject.role) as "kol" | "agent";
 
   // AS-P2-4 fix: dev-mock fallback is now gated on NODE_ENV. The
   // previous condition (missing key OR starts with PLACEHOLDER) would
   // silently activate a /dev/stripe-mock URL in production if the env
-  // was misconfigured — a real KOL would click "Onboard with Stripe"
+  // was misconfigured — a real subject would click "Onboard with Stripe"
   // and land on a local placeholder page, never reaching Stripe.
   //
   // Now: only return mock when NODE_ENV === 'development' AND the
@@ -47,16 +50,16 @@ export async function postMyStripeConnect(req: Request, res: Response) {
       env.STRIPE_SECRET_KEY.startsWith("PLACEHOLDER") ||
       env.STRIPE_SECRET_KEY === "sk_test_PLACEHOLDER");
   if (isDevMock) {
-    const mockAccountId = existingAccountId || `acct_devmock_${promoter.id.slice(0, 8)}`;
+    const mockAccountId = existingAccountId || `acct_devmock_${subject.id.slice(0, 8)}`;
     await affiliateSupabase.from("promoters")
       .update({
         stripe_account_id: mockAccountId,
         stripe_onboarding_completed: false,
       })
-      .eq("id", promoter.id);
+      .eq("id", subject.id);
     res.json({
       data: {
-        url: `/dev/stripe-mock?account=${mockAccountId}&return=${encodeURIComponent(settingsStripeReturnUrl(p?.role || "kol"))}`,
+        url: `/dev/stripe-mock?account=${mockAccountId}&return=${encodeURIComponent(settingsStripeReturnUrl(role))}`,
         mode: "dev-mock",
         accountId: mockAccountId,
       },
@@ -67,29 +70,29 @@ export async function postMyStripeConnect(req: Request, res: Response) {
   try {
     let accountId = existingAccountId;
 
-    // 1. Create Connect Express account if KOL doesn't have one yet
+    // 1. Create Connect Express account if subject doesn't have one yet
     if (!accountId) {
       // AS-P2-3: idempotencyKey prevents double-creation when a
       // user double-clicks or two browser tabs race. The key is
-      // derived from the immutable promoter.id so retries within the
+      // derived from the immutable subject.id so retries within the
       // 24h Stripe idempotency window collapse to one account.
       const account = await stripe.accounts.create(
         {
           type: "express",
-          country: promoter.country_code || "US",
-          email: promoter.email,
+          country: subject.country_code || "US",
+          email: subject.email,
           capabilities: {
             transfers: { requested: true },
           },
           business_type: "individual",
           metadata: {
-            promoter_id: promoter.id,
-            promoter_name: promoter.name || "",
-            role: p?.role || "kol",
+            promoter_id: subject.id,
+            promoter_name: subject.name || "",
+            role,
             agent_level: p?.agent_level || null,
           },
         },
-        { idempotencyKey: `promoter-connect-${promoter.id}` },
+        { idempotencyKey: `promoter-connect-${subject.id}` },
       );
       accountId = account.id;
 
@@ -99,14 +102,14 @@ export async function postMyStripeConnect(req: Request, res: Response) {
           stripe_account_id: accountId,
           stripe_onboarding_completed: false,
         })
-        .eq("id", promoter.id);
+        .eq("id", subject.id);
     }
 
     // 2. Create one-time account-link for onboarding / login
     const link = await stripe.accountLinks.create({
       account: accountId,
-      refresh_url: `${settingsStripeReturnUrl(p?.role || "kol")}?refresh=true`,
-      return_url: `${settingsStripeReturnUrl(p?.role || "kol")}?return=true`,
+      refresh_url: `${settingsStripeReturnUrl(role)}?refresh=true`,
+      return_url: `${settingsStripeReturnUrl(role)}?return=true`,
       type: "account_onboarding",
     });
 
@@ -129,21 +132,22 @@ export async function postMyStripeConnect(req: Request, res: Response) {
  * GET /me/stripe-status
  *
  * Returns current Connect onboarding status from the promoter row.
- * Replaces the stub that always returned connected: false.
+ * Replaces the stub that always returned connected: false. Works
+ * for both KOL and Agent subjects.
  */
 export async function getMyStripeStatus(req: Request, res: Response) {
-  const promoter = req.promoter;
-  if (!promoter) {
+  const subject = req.subject;
+  if (!subject) {
     res.status(401).json({
-      error: { code: "UNAUTHORIZED", message: "Missing promoter context" },
+      error: { code: "UNAUTHORIZED", message: "Missing subject context" },
     });
     return;
   }
 
-  // Read latest values from DB (don't trust req.promoter cache)
+  // Read latest values from DB (don't trust req.subject cache)
   const { data } = await affiliateSupabase.from("promoters")
     .select("stripe_account_id, stripe_onboarding_completed")
-    .eq("id", promoter.id)
+    .eq("id", subject.id)
     .single();
 
   const accountId = data?.stripe_account_id ?? null;

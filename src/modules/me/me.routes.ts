@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { kolAuthMiddleware } from "../../middleware/kol-auth.js";
+import { kolOrAgentAuthMiddleware } from "../../middleware/kol-or-agent-auth.js";
 import {
   getMyStats,
   getMyEarnings,
@@ -24,8 +25,20 @@ import { getMyProjection } from "./projection.controller.js";
 
 export const meRouter = Router();
 
-// All KOL endpoints require an authenticated session whose email
-// matches a promoter row. See kolAuthMiddleware for details.
+// Stripe Connect onboarding is shared by both the KOL portal and the
+// Agent portal — both roles earn commissions and need a Connect
+// account to receive payouts. Mounted on a sub-router with
+// `kolOrAgentAuthMiddleware` so KOLs authenticate as KOLs and Agents
+// authenticate as Agents, both ending up at the same handler with
+// `req.subject` populated.
+const stripeConnectRouter = Router();
+stripeConnectRouter.use(kolOrAgentAuthMiddleware);
+stripeConnectRouter.get("/stripe-status", getMyStripeStatus);
+stripeConnectRouter.post("/stripe-connect", postMyStripeConnect);
+meRouter.use(stripeConnectRouter);
+
+// All other KOL endpoints require an authenticated session whose
+// email matches a promoter row. See kolAuthMiddleware for details.
 meRouter.use(kolAuthMiddleware);
 
 meRouter.get("/stats", getMyStats);
@@ -42,8 +55,6 @@ meRouter.get("/", getMe);
 meRouter.get("/me", getMe);
 meRouter.get("/profile", getMe);
 meRouter.patch("/", updateMe);
-meRouter.get("/stripe-status", getMyStripeStatus);
-meRouter.post("/stripe-connect", postMyStripeConnect);
 // Batch 8a: dashboard analytics, tax docs, commission projection.
 meRouter.get("/analytics", getMyAnalytics);
 meRouter.get("/tax-docs", getMyTaxDocs);
